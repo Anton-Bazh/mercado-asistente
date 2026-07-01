@@ -1,0 +1,9 @@
+# Entorno y dependencias
+.venv/
+__pycache__/
+*.pyc
+
+# Datos sensibles (NUNCA versionar)
+data/
+certs/
+.env
