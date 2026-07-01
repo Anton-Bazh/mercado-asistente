@@ -131,10 +131,16 @@ def list_ready_with_pending(limit: int = 50) -> tuple[list[dict], set[str]]:
     """
     rows = list_ready_to_ship(limit)
     recent = storage.recent_printed_shipment_ids(within_seconds=600)
+    try:
+        threshold = int(storage.get_value(storage.MULTIUNIT_THRESHOLD) or "1")
+    except ValueError:
+        threshold = 1
     for r in rows:
         already = (r.get("substatus") == "printed"
                    or str(r.get("shipment_id")) in recent)
         r["pending"] = not already
+        # Multi-unidad: supera el umbral → gestión manual (no auto-imprime).
+        r["multi_unit"] = int(r.get("units", 1) or 1) > threshold
     return rows, recent
 
 
@@ -164,6 +170,7 @@ def _normalize_row(order: dict, shipment: dict) -> dict:
         }
         for it in items
     ]
+    units = sum(int(p.get("quantity", 1) or 1) for p in products)
 
     return {
         "order_id": order.get("id"),
@@ -173,11 +180,42 @@ def _normalize_row(order: dict, shipment: dict) -> dict:
         "buyer_name": buyer_name,
         "address": address or "—",
         "products": products,
+        "units": units,
         "total_amount": order.get("total_amount"),
         "currency": order.get("currency_id", ""),
         "shipment_status": shipment.get("status"),
         "substatus": shipment.get("substatus"),
     }
+
+
+# --- Separación de envíos (split) --------------------------------------------
+def split_shipment(shipment_id: str | int, order_id: str | int,
+                   quantity: int, reason: str = "DIMENSIONS_EXCEEDED") -> dict:
+    """Separa un envío en Mercado Libre (POST /shipments/{id}/split).
+
+    Separa `quantity` unidades de la orden `order_id` a un segundo paquete. ML
+    solo permite separar una vez y es irreversible. Devuelve la respuesta JSON.
+    """
+    body = {
+        "reason": reason,
+        "packs": [{"orders": [{"id": str(order_id), "quantity": int(quantity)}]}],
+    }
+    headers = {
+        "Authorization": f"Bearer {auth.get_valid_access_token()}",
+        "x-format-new": "true",
+        "Content-Type": "application/json",
+    }
+    url = f"{SHIPMENTS_URL}/{shipment_id}/split"
+    try:
+        resp = httpx.post(url, json=body, headers=headers, timeout=HTTP_TIMEOUT)
+    except httpx.HTTPError as exc:
+        raise MeliError(f"Error de red al separar: {exc}") from exc
+    if resp.status_code >= 400:
+        raise MeliError(f"No se pudo separar ({resp.status_code}): {resp.text[:300]}")
+    try:
+        return resp.json()
+    except ValueError:
+        return {"ok": True}
 
 
 # --- Etiquetas ---------------------------------------------------------------

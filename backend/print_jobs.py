@@ -18,11 +18,11 @@ import threading
 import time
 import uuid
 
-import auth
 import label_layout
-import meli_client
+import orders_hub
 import printers
 import storage
+from providers.base import ProviderError
 
 # Estados por envío que ve la interfaz.
 #   pending  = en espera
@@ -100,6 +100,8 @@ def start(items: list[dict], fmt: str, printer: str) -> str:
                     "order_id": it.get("order_id"),
                     "buyer_name": it.get("buyer_name"),
                     "product_summary": it.get("product_summary"),
+                    "account_id": it.get("account_id"),
+                    "account_name": it.get("account_name"),
                     "status": "pending",
                 }
                 for it in items
@@ -137,6 +139,7 @@ def _record(item: dict, fmt: str, status_val: str, printer: str,
         order_id=item.get("order_id"), buyer_name=item.get("buyer_name"),
         product_summary=item.get("product_summary"),
         printer=printer, sheets=sheets, error=error,
+        account=item.get("account_name"),
     )
 
 
@@ -224,14 +227,14 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
             return
 
         _set(item, "printing")
-        _msg(f"Pidiendo etiqueta {idx + 1} de {len(items)} a Mercado Libre…")
+        _msg(f"Pidiendo etiqueta {idx + 1} de {len(items)}…")
         try:
-            pdf, _ct, _fn = meli_client.get_label(item["shipment_id"], fmt)
-        except (auth.AuthError, meli_client.MeliError) as exc:
-            # No se pudo pedir esta etiqueta (NO consumida en ML). Imprime buffer y para.
+            pdf, _ct, _fn = orders_hub.get_label(item.get("account_id"), item["shipment_id"], fmt)
+        except ProviderError as exc:
+            # No se pudo pedir esta etiqueta (NO consumida). Imprime buffer y para.
             flush()
             _set(item, "blocked")
-            _record(item, fmt, "blocked", printer, None, f"Error al pedir a ML: {exc}")
+            _record(item, fmt, "blocked", printer, None, f"Error al pedir la etiqueta: {exc}")
             for rest in items[idx + 1:]:
                 _set(rest, "blocked")
                 _record(rest, fmt, "blocked", printer, None, "Detenido tras error de ML.")

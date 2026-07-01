@@ -6,20 +6,20 @@ consultas a Mercado Libre. Escucha solo en 127.0.0.1 sobre HTTPS (ver run.sh).
 from __future__ import annotations
 
 import json
-import time
 import uuid
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-import auth
 import label_layout
-import meli_client
+import orders_hub
 import print_jobs
 import printers
 import scheduler
 import storage
 from config import FRONTEND_DIR, SITE_ID, STAMP_PATH
+from providers.base import ProviderError
+from providers.registry import CATALOG, get_provider
 
 app = FastAPI(title="Mercado Asistente", docs_url=None, redoc_url=None)
 
@@ -79,40 +79,62 @@ def stamp() -> JSONResponse:
     return JSONResponse({"stamp": STAMP})
 
 
-# --- Configuración -----------------------------------------------------------
-@app.get("/api/config")
-def get_config() -> JSONResponse:
-    """Estado de configuración. NUNCA devuelve el secret ni los tokens."""
-    return JSONResponse(
-        {
-            "configured": auth.is_configured(),
-            "app_id": storage.get_value(storage.APP_ID) or "",
-            "redirect_uri": storage.get_value(storage.REDIRECT_URI) or "",
-            "has_secret": bool(storage.get_value(storage.CLIENT_SECRET)),
-        }
-    )
+# --- Cuentas / tiendas (multi-proveedor) -------------------------------------
+def _account_or_404(account_id: str) -> dict:
+    acc = storage.get_account(account_id)
+    if not acc:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada.")
+    return acc
 
 
-@app.post("/api/config")
-def save_config(
-    app_id: str = Form(...),
-    client_secret: str = Form(""),
-    redirect_uri: str = Form(...),
-) -> JSONResponse:
-    storage.set_value(storage.APP_ID, app_id.strip())
-    storage.set_value(storage.REDIRECT_URI, redirect_uri.strip())
-    # El secret solo se actualiza si se envía uno nuevo (campo vacío = conservar)
-    if client_secret.strip():
-        storage.set_value(storage.CLIENT_SECRET, client_secret.strip())
-    return JSONResponse({"ok": True, "configured": auth.is_configured()})
+@app.get("/api/providers")
+def providers_catalog() -> JSONResponse:
+    return JSONResponse({"providers": CATALOG})
 
 
-# --- OAuth -------------------------------------------------------------------
-@app.get("/api/connect")
-def connect() -> JSONResponse:
+@app.get("/api/accounts")
+def accounts() -> JSONResponse:
+    return JSONResponse({
+        "accounts": [orders_hub.account_public(a) for a in storage.list_accounts()],
+    })
+
+
+@app.post("/api/accounts")
+def save_account(provider: str = Form("ml"), name: str = Form(""),
+                 app_id: str = Form(...), client_secret: str = Form(""),
+                 redirect_uri: str = Form(...),
+                 account_id: str = Form("")) -> JSONResponse:
+    aid = account_id.strip() or uuid.uuid4().hex[:12]
+    fields = {"provider": provider, "name": name.strip() or "Tienda",
+              "site": SITE_ID, "app_id": app_id.strip(), "redirect_uri": redirect_uri.strip()}
+    if client_secret.strip():   # vacío = conservar el existente
+        fields["client_secret"] = client_secret.strip()
+    storage.upsert_account(aid, **fields)
+    return JSONResponse({"ok": True, "account_id": aid})
+
+
+@app.delete("/api/accounts/{account_id}")
+def del_account(account_id: str) -> JSONResponse:
+    _account_or_404(account_id)
+    storage.delete_account(account_id)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/accounts/{account_id}/enabled")
+def enable_account(account_id: str, enabled: str = Form("1")) -> JSONResponse:
+    _account_or_404(account_id)
+    storage.set_account_enabled(account_id, enabled in ("1", "true", "on", "True"))
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/accounts/{account_id}/connect")
+def account_connect(account_id: str) -> JSONResponse:
+    acc = _account_or_404(account_id)
+    state = uuid.uuid4().hex
+    storage.set_value("oauthstate_" + state, account_id)
     try:
-        url = auth.build_authorization_url()
-    except auth.AuthError as exc:
+        url = get_provider(acc["provider"]).authorize_url(acc, state)
+    except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return JSONResponse({"authorization_url": url})
 
@@ -120,111 +142,105 @@ def connect() -> JSONResponse:
 @app.get("/callback")
 def callback(code: str | None = None, state: str | None = None,
              error: str | None = None) -> Response:
-    """Recibe la redirección de Mercado Libre tras autorizar."""
+    """Redirección OAuth: resuelve la cuenta por 'state'."""
     if error:
-        return _callback_html(False, f"Mercado Libre devolvió un error: {error}")
-    if not code:
-        return _callback_html(False, "No se recibió el parámetro 'code'.")
+        return _callback_html(False, f"El proveedor devolvió un error: {error}")
+    if not code or not state:
+        return _callback_html(False, "Faltan parámetros (code/state).")
+    account_id = storage.get_value("oauthstate_" + state)
+    if not account_id:
+        return _callback_html(False, "Sesión de conexión no reconocida (state).")
+    acc = storage.get_account(account_id)
+    if not acc:
+        return _callback_html(False, "La cuenta ya no existe.")
     try:
-        auth.exchange_code(code, state)
-        meli_client.get_seller()  # cachea seller_id y nickname
-    except (auth.AuthError, meli_client.MeliError) as exc:
+        get_provider(acc["provider"]).exchange_code(acc, code)
+    except ProviderError as exc:
         return _callback_html(False, str(exc))
-    return _callback_html(True, "Cuenta conectada correctamente.")
+    storage.delete_value("oauthstate_" + state)
+    return _callback_html(True, f"Tienda «{acc.get('name') or acc.get('nickname') or ''}» conectada.")
 
 
-@app.post("/api/connect/manual")
-def connect_manual(code: str = Form(...)) -> JSONResponse:
-    """Fallback: intercambiar un code pegado a mano (sin validar state)."""
+@app.post("/api/accounts/{account_id}/connect/manual")
+def account_connect_manual(account_id: str, code: str = Form(...)) -> JSONResponse:
+    acc = _account_or_404(account_id)
     try:
-        auth.exchange_code(code.strip(), state=None)
-        meli_client.get_seller()
-    except (auth.AuthError, meli_client.MeliError) as exc:
+        get_provider(acc["provider"]).exchange_code(acc, code.strip())
+    except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return JSONResponse({"ok": True})
 
 
-@app.post("/api/refresh")
-def refresh() -> JSONResponse:
-    """Fuerza la renovación del access_token."""
+@app.post("/api/accounts/{account_id}/refresh")
+def account_refresh(account_id: str) -> JSONResponse:
+    acc = _account_or_404(account_id)
     try:
-        auth.refresh_access_token()
-    except auth.AuthError as exc:
+        get_provider(acc["provider"]).refresh(acc)
+    except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return JSONResponse({"ok": True, "token_expires_in": _token_expires_in()})
+    return JSONResponse({"ok": True})
 
 
-@app.post("/api/disconnect")
-def disconnect() -> JSONResponse:
-    auth.disconnect()
+@app.post("/api/accounts/{account_id}/disconnect")
+def account_disconnect(account_id: str) -> JSONResponse:
+    _account_or_404(account_id)
+    storage.clear_account_tokens(account_id)
     return JSONResponse({"ok": True})
 
 
 @app.get("/api/status")
 def status() -> JSONResponse:
-    connected = auth.is_connected()
-    return JSONResponse(
-        {
-            "configured": auth.is_configured(),
-            "connected": connected,
-            "site": SITE_ID,
-            "nickname": storage.get_value(storage.SELLER_NICKNAME) if connected else None,
-            "seller_id": storage.get_value(storage.SELLER_ID) if connected else None,
-            "token_expires_in": _token_expires_in() if connected else None,
-        }
-    )
-
-
-# --- Datos de ventas ---------------------------------------------------------
-@app.get("/api/orders")
-def orders() -> JSONResponse:
-    if not auth.is_connected():
-        raise HTTPException(status_code=409, detail="La cuenta no está conectada.")
-    try:
-        rows, _recent = meli_client.list_ready_with_pending()
-    except (auth.AuthError, meli_client.MeliError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    accs = storage.list_accounts()
+    connected = [a for a in accs if a.get("refresh_token") and a.get("enabled")]
     return JSONResponse({
-        "orders": rows,
-        "printed_today": storage.count_print_history_today(),
+        "connected": bool(connected),
+        "site": SITE_ID,
+        "accounts_total": len(accs),
+        "accounts_connected": len(connected),
     })
 
 
-# --- Etiquetas ---------------------------------------------------------------
+# --- Datos de ventas (cola combinada de todas las tiendas) -------------------
+@app.get("/api/orders")
+def orders() -> JSONResponse:
+    data = orders_hub.list_all_pending()
+    data["printed_today"] = storage.count_print_history_today()
+    return JSONResponse(data)
+
+
+# --- Etiquetas (respaldo en navegador) ---------------------------------------
 @app.get("/api/label/{shipment_id}")
-def label(shipment_id: str, format: str = "pdf") -> Response:
+def label(shipment_id: str, account_id: str, format: str = "pdf") -> Response:
     fmt = "zpl" if format.lower() == "zpl" else "pdf"
     try:
-        content, content_type, filename = meli_client.get_label(shipment_id, fmt)
-    except (auth.AuthError, meli_client.MeliError) as exc:
+        content, content_type, filename = orders_hub.get_label(account_id, shipment_id, fmt)
+    except ProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     disposition = "inline" if fmt == "pdf" else "attachment"
-    return Response(
-        content=content,
-        media_type=content_type,
-        headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
-    )
+    return Response(content=content, media_type=content_type,
+                    headers={"Content-Disposition": f'{disposition}; filename="{filename}"'})
 
 
 @app.get("/api/labels")
-def labels(ids: str, format: str = "pdf") -> Response:
-    """Etiqueta combinada para varios envíos (ids separados por coma)."""
+def labels(ids: str, account_id: str, format: str = "pdf") -> Response:
+    """Etiqueta combinada de varios envíos de UNA cuenta (respaldo navegador)."""
     id_list = [i.strip() for i in ids.split(",") if i.strip()]
     if not id_list:
         raise HTTPException(status_code=400, detail="No se indicaron envíos.")
     fmt = "zpl" if format.lower() == "zpl" else "pdf"
     try:
-        content, content_type, filename = meli_client.get_labels(id_list, fmt)
-    except (auth.AuthError, meli_client.MeliError) as exc:
+        pages = [orders_hub.get_label(account_id, sid, fmt)[0] for sid in id_list]
+    except ProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    if fmt == "pdf" and len(id_list) > 1:
-        content, _meta = label_layout.pack_labels_to_sheets(content)
+    if fmt == "pdf":
+        content, _meta = (label_layout.pack_pdf_list(pages) if len(pages) > 1
+                          else (pages[0], {}))
+        ctype, fn = "application/pdf", "etiquetas.pdf"
+    else:
+        content, ctype, fn = b"".join(pages), "text/plain; charset=utf-8", "etiquetas.zpl"
     disposition = "inline" if fmt == "pdf" else "attachment"
-    return Response(
-        content=content,
-        media_type=content_type,
-        headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
-    )
+    return Response(content=content, media_type=ctype,
+                    headers={"Content-Disposition": f'{disposition}; filename="{fn}"'})
 
 
 # --- Impresoras (CUPS) -------------------------------------------------------
@@ -346,33 +362,36 @@ def _record1(sid: str, fmt: str, status_val: str, info: dict,
         batch_id=uuid.uuid4().hex[:12], shipment_id=str(sid), fmt=fmt,
         status=status_val, order_id=info.get("order_id"),
         buyer_name=info.get("buyer_name"), product_summary=info.get("product_summary"),
-        printer=printer, sheets=sheets, error=error,
+        printer=printer, sheets=sheets, error=error, account=info.get("account_name"),
     )
 
 
 @app.post("/api/print/{shipment_id}")
 def print_label(shipment_id: str, format: str = Form("pdf"),
                 printer: str = Form(""), meta: str = Form("")) -> JSONResponse:
-    """Imprime una etiqueta: verifica → pide a ML → imprime → confirma."""
+    """Imprime una etiqueta: verifica → pide la etiqueta → imprime → confirma."""
     fmt = "zpl" if format.lower() == "zpl" else "pdf"
     info = _parse_meta(meta).get(str(shipment_id), {})
+    account_id = info.get("account_id")
+    if not account_id:
+        raise HTTPException(status_code=400, detail="Falta la tienda del envío (account_id).")
     target = _resolve_target(printer)
 
-    # 1) Verificación previa: si la impresora no está lista, NO se pide a ML.
+    # 1) Verificación previa: si la impresora no está lista, NO se pide la etiqueta.
     ok, reason = printers.preflight(target)
     if not ok:
         _record1(shipment_id, fmt, "blocked", info, target, None,
-                 f"No se pidió a ML: {reason}")
+                 f"No se pidió la etiqueta: {reason}")
         raise HTTPException(
             status_code=409,
             detail=(f"No se imprimió para no perder la etiqueta: {reason} "
-                    "La venta sigue pendiente en Mercado Libre."),
+                    "La venta sigue pendiente."),
         )
 
-    # 2) Pedir la etiqueta (aquí ML la marca como impresa).
+    # 2) Pedir la etiqueta al proveedor de esa tienda (aquí se marca impresa).
     try:
-        content, _ctype, _fn = meli_client.get_label(shipment_id, fmt)
-    except (auth.AuthError, meli_client.MeliError) as exc:
+        content, _ctype, _fn = orders_hub.get_label(account_id, shipment_id, fmt)
+    except ProviderError as exc:
         _record1(shipment_id, fmt, "blocked", info, target, None, str(exc))
         raise HTTPException(status_code=502, detail=str(exc))
 
@@ -428,12 +447,39 @@ def auto_status() -> JSONResponse:
     return JSONResponse(scheduler.status())
 
 
-@app.post("/api/auto")
-def auto_config(enabled: str = Form("0"), start: str = Form("01:00"),
-                end: str = Form("05:00"), interval_min: int = Form(60)) -> JSONResponse:
+@app.get("/api/auto/default")
+def auto_default() -> JSONResponse:
+    import rules
+    return JSONResponse(rules.default_rules())
+
+
+@app.post("/api/auto/split")
+def auto_split(shipment_id: str = Form(...), order_id: str = Form(...),
+               account_id: str = Form(...), quantity: int = Form(1),
+               reason: str = Form("DIMENSIONS_EXCEEDED")) -> JSONResponse:
+    """Separa un envío en su marketplace (acción manual desde la lista)."""
+    acc = _account_or_404(account_id)
     try:
-        cfg = scheduler.set_config(enabled in ("1", "true", "on", "True"),
-                                   start.strip(), end.strip(), interval_min)
+        res = get_provider(acc["provider"]).split(acc, shipment_id, order_id, quantity, reason)
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return JSONResponse({"ok": True, "result": res})
+
+
+@app.post("/api/auto")
+def auto_config(enabled: str = Form("0"), interval_min: int = Form(30),
+                multiunit_threshold: int = Form(1),
+                rules: str = Form("")) -> JSONResponse:
+    rules_data = None
+    if rules.strip():
+        try:
+            rules_data = json.loads(rules)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Reglas con formato inválido.")
+    try:
+        cfg = scheduler.set_config(
+            enabled in ("1", "true", "on", "True"),
+            interval_min, multiunit_threshold, rules_data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return JSONResponse({"ok": True, "config": cfg})
@@ -494,14 +540,6 @@ def print_history(limit: int = 50, offset: int = 0,
 
 
 # --- Utilidades --------------------------------------------------------------
-def _token_expires_in() -> int:
-    """Segundos restantes de validez del access_token (0 si no hay)."""
-    expires_at = storage.get_value(storage.TOKEN_EXPIRES_AT)
-    if not expires_at:
-        return 0
-    return max(0, int(expires_at) - int(time.time()))
-
-
 def _callback_html(ok: bool, message: str) -> Response:
     """Página simple de retorno tras el OAuth; vuelve a la app en 2.5 s."""
     color = "#15824a" if ok else "#c43232"

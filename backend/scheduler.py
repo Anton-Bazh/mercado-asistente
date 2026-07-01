@@ -13,18 +13,18 @@ previa). Si algo falta, no imprime y lo explica en el estado.
 """
 from __future__ import annotations
 
-import re
 import threading
 import time
 from datetime import datetime
 
-import auth
 import label_layout
-import meli_client
+import orders_hub
 import print_jobs
 import printers
+import rules
 import storage
 from config import DEFAULT_LABEL_W_PT, DEFAULT_LABEL_H_PT
+from providers.base import ProviderError
 
 _lock = threading.Lock()
 _started = False
@@ -36,27 +36,29 @@ _status: dict = {
     "last_check": None,
 }
 
-_HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
-
 
 # --- Configuración -----------------------------------------------------------
 def get_config() -> dict:
+    try:
+        thr = int(storage.get_value(storage.MULTIUNIT_THRESHOLD) or "1")
+    except ValueError:
+        thr = 1
     return {
         "enabled": storage.get_value(storage.AUTO_ENABLED) == "1",
-        "start": storage.get_value(storage.AUTO_START) or "01:00",
-        "end": storage.get_value(storage.AUTO_END) or "05:00",
-        "interval_min": int(storage.get_value(storage.AUTO_INTERVAL) or "60"),
+        "interval_min": int(storage.get_value(storage.AUTO_INTERVAL) or "30"),
+        "multiunit_threshold": thr,
+        "rules": rules.get_rules(),
     }
 
 
-def set_config(enabled: bool, start: str, end: str, interval_min: int) -> dict:
-    if not _HHMM.match(start or "") or not _HHMM.match(end or ""):
-        raise ValueError("Horario inválido (usa HH:MM).")
+def set_config(enabled: bool, interval_min: int, multiunit_threshold: int,
+               rules_data: dict | None = None) -> dict:
     interval_min = max(5, min(int(interval_min), 720))
     storage.set_value(storage.AUTO_ENABLED, "1" if enabled else "0")
-    storage.set_value(storage.AUTO_START, start)
-    storage.set_value(storage.AUTO_END, end)
     storage.set_value(storage.AUTO_INTERVAL, str(interval_min))
+    storage.set_value(storage.MULTIUNIT_THRESHOLD, str(max(1, int(multiunit_threshold))))
+    if rules_data is not None:
+        rules.set_rules(rules_data)     # valida y guarda
     return get_config()
 
 
@@ -64,9 +66,7 @@ def status() -> dict:
     with _lock:
         st = dict(_status)
     cfg = get_config()
-    now = datetime.now()
-    now_min = now.hour * 60 + now.minute
-    in_window = _in_window(now_min, _hm_to_min(cfg["start"]), _hm_to_min(cfg["end"]))
+    mode, label = rules.current_mode()
     _w, _h, size_known = _label_size()
     target = storage.get_value(storage.DEFAULT_PRINTER) or printers.system_default() or ""
     printer_ready = False
@@ -79,11 +79,12 @@ def status() -> dict:
         **st,
         "config": cfg,
         "printer": target,
+        "mode_now": mode,
+        "mode_label": label,
         "checks": {
-            "connected": auth.is_connected(),
+            "connected": bool(orders_hub.connected_accounts()),
             "printer_ready": printer_ready,
             "size_known": size_known,
-            "in_window": in_window,
         },
     }
 
@@ -95,19 +96,6 @@ def _set(state: str, message: str) -> None:
 
 
 # --- Utilidades --------------------------------------------------------------
-def _hm_to_min(s: str) -> int:
-    h, m = s.split(":")
-    return int(h) * 60 + int(m)
-
-
-def _in_window(now_min: int, start_min: int, end_min: int) -> bool:
-    if start_min == end_min:
-        return True                       # ventana de 24 h
-    if start_min < end_min:
-        return start_min <= now_min < end_min
-    return now_min >= start_min or now_min < end_min   # cruza la medianoche
-
-
 def _label_size() -> tuple[float, float, bool]:
     w = storage.get_value(storage.LABEL_W)
     h = storage.get_value(storage.LABEL_H)
@@ -136,11 +124,9 @@ def _tick() -> None:
         _set("off", "Automático desactivado.")
         return
 
-    now = datetime.now()
-    now_min = now.hour * 60 + now.minute
-    start, end = _hm_to_min(cfg["start"]), _hm_to_min(cfg["end"])
-    if not _in_window(now_min, start, end):
-        _set("waiting_window", f"Fuera de horario. Ventana {cfg['start']}–{cfg['end']}.")
+    mode, label = rules.current_mode()
+    if mode == "pausa":
+        _set("paused", f"En pausa: {label}.")
         return
 
     job = print_jobs.status()
@@ -151,14 +137,14 @@ def _tick() -> None:
     now_ts = time.time()
     if now_ts - _last_check_ts < cfg["interval_min"] * 60:
         mins = int((cfg["interval_min"] * 60 - (now_ts - _last_check_ts)) / 60) + 1
-        _set("waiting_interval", f"En horario. Próxima revisión en ~{mins} min.")
+        _set("waiting_interval", f"Activo ({mode}: {label}). Próxima revisión en ~{mins} min.")
         return
     _last_check_ts = now_ts
     with _lock:
         _status["last_check"] = int(now_ts)
 
-    if not auth.is_connected():
-        _set("no_conn", "En horario, pero la cuenta de Mercado Libre no está conectada.")
+    if not orders_hub.connected_accounts():
+        _set("no_conn", "No hay ninguna tienda conectada.")
         return
 
     w, h, real = _label_size()
@@ -169,25 +155,35 @@ def _tick() -> None:
 
     target = storage.get_value(storage.DEFAULT_PRINTER) or printers.system_default() or ""
     if not target:
-        _set("no_printer", "En horario, pero no hay impresora predeterminada.")
+        _set("no_printer", "No hay impresora predeterminada.")
         return
     ok, reason = printers.preflight(target)
     if not ok:
-        _set("printer_not_ready", f"En horario, pero la impresora no está lista: {reason}")
+        _set("printer_not_ready", f"La impresora no está lista: {reason}")
         return
 
     try:
-        rows, _recent = meli_client.list_ready_with_pending()
-    except (auth.AuthError, meli_client.MeliError) as exc:
+        rows = orders_hub.list_all_pending()["orders"]
+    except ProviderError as exc:
         _set("error", f"No se pudieron leer las ventas: {exc}")
         return
 
-    pending = [r for r in rows if r.get("pending")]
-    full = (len(pending) // per) * per        # solo hojas completas
-    if full < per:
-        _set("waiting_fill",
-             f"Esperando etiquetas: {len(pending)} pendiente(s); faltan para llenar una hoja de {per}.")
+    # Multi-unidad NUNCA entra al automático (se gestiona manual en Separación).
+    pending = [r for r in rows if r.get("pending") and not r.get("multi_unit")]
+    if not pending:
+        _set("idle_ok", f"Activo ({label}). No hay pendientes para imprimir.")
         return
+
+    if mode == "forzar":
+        # Vaciado: imprime TODO lo pendiente, aunque la hoja no se llene.
+        selected = pending
+    else:  # ahorro
+        full = (len(pending) // per) * per
+        if full < per:
+            _set("waiting_fill",
+                 f"Ahorro ({label}): {len(pending)} pendiente(s); faltan para llenar una hoja de {per}.")
+            return
+        selected = pending[:full]
 
     items = [
         {
@@ -195,15 +191,19 @@ def _tick() -> None:
             "order_id": r.get("order_id"),
             "buyer_name": r.get("buyer_name"),
             "product_summary": _product_summary(r),
+            "account_id": r.get("account_id"),
+            "account_name": r.get("account_name"),
         }
-        for r in pending[:full]
+        for r in selected
     ]
     try:
         print_jobs.start(items, "pdf", target)
         with _lock:
             _status["last_run"] = int(now_ts)
+        sheets = -(-len(items) // per)   # techo
         _set("printing",
-             f"Imprimiendo {full} etiqueta(s) en {full // per} hoja(s) en «{target}».")
+             f"{('Vaciado' if mode == 'forzar' else 'Ahorro')} ({label}): "
+             f"imprimiendo {len(items)} etiqueta(s) en ~{sheets} hoja(s) en «{target}».")
     except print_jobs.BatchBusy:
         _set("printing", "Ya hay un lote en curso.")
 

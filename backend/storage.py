@@ -33,11 +33,11 @@ OAUTH_STATE = "oauth_state"          # transitorio durante el login
 DEFAULT_PRINTER = "default_printer"  # predeterminada propia de EtiquetaFlow ('' = ninguna explícita)
 LABEL_W = "label_w"                  # tamaño real de la etiqueta (pt), aprendido al descargar una
 LABEL_H = "label_h"
-# --- Modo automático (impresión por horario en el servidor) ---
+# --- Modo automático (motor de reglas por horario en el servidor) ---
 AUTO_ENABLED = "auto_enabled"        # '1'/'0'
-AUTO_START = "auto_start"            # 'HH:MM' inicio de ventana
-AUTO_END = "auto_end"                # 'HH:MM' fin de ventana
-AUTO_INTERVAL = "auto_interval_min"  # minutos entre revisiones dentro de la ventana
+AUTO_INTERVAL = "auto_interval_min"  # minutos entre revisiones
+AUTO_RULES = "auto_rules"            # JSON: reglas semanales por día/tramo/modo
+MULTIUNIT_THRESHOLD = "multiunit_threshold"  # >N unidades → lista de separación (def. 1)
 
 # Conjunto de claves cuyo valor se cifra en reposo
 _ENCRYPTED_KEYS = {CLIENT_SECRET, ACCESS_TOKEN, REFRESH_TOKEN, PKCE_VERIFIER}
@@ -95,11 +95,34 @@ def _connect() -> sqlite3.Connection:
         conn.execute("ALTER TABLE print_history ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'")
         # Deriva el estado de las filas antiguas: ok=1→'ok', ok=0→'error'.
         conn.execute("UPDATE print_history SET status = CASE WHEN ok = 1 THEN 'ok' ELSE 'error' END")
+    if "account" not in cols:
+        try:
+            conn.execute("ALTER TABLE print_history ADD COLUMN account TEXT")
+        except sqlite3.OperationalError:
+            pass
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_history_ts ON print_history (ts DESC)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_history_shipment ON print_history (shipment_id)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS accounts ("
+        " id TEXT PRIMARY KEY,"
+        " provider TEXT NOT NULL,"
+        " name TEXT,"
+        " site TEXT,"
+        " app_id TEXT,"
+        " client_secret TEXT,"        # cifrado
+        " redirect_uri TEXT,"
+        " access_token TEXT,"         # cifrado
+        " refresh_token TEXT,"        # cifrado
+        " token_expires_at INTEGER,"
+        " seller_id TEXT,"
+        " nickname TEXT,"
+        " enabled INTEGER NOT NULL DEFAULT 1,"
+        " created INTEGER NOT NULL DEFAULT 0"
+        ")"
     )
     return conn
 
@@ -110,6 +133,7 @@ def init() -> None:
         conn = _connect()
         conn.commit()
         conn.close()
+    migrate_single_account()
 
 
 def set_value(key: str, value: Optional[str]) -> None:
@@ -168,6 +192,7 @@ def set_many(items: dict[str, Optional[str]]) -> None:
 _HISTORY_COLS = (
     "id", "ts", "batch_id", "shipment_id", "order_id", "buyer_name",
     "product_summary", "format", "printer", "sheets", "ok", "status", "error",
+    "account",
 )
 
 
@@ -182,6 +207,7 @@ def add_print_history(
     printer: Optional[str] = None,
     sheets: Optional[int] = None,
     error: Optional[str] = None,
+    account: Optional[str] = None,
     ts: Optional[int] = None,
 ) -> None:
     """Registra un intento de impresión de un envío con su estado."""
@@ -192,14 +218,14 @@ def add_print_history(
             conn.execute(
                 "INSERT INTO print_history"
                 " (ts, batch_id, shipment_id, order_id, buyer_name,"
-                "  product_summary, format, printer, sheets, ok, status, error)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  product_summary, format, printer, sheets, ok, status, error, account)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ts if ts is not None else int(time.time()),
                     batch_id, str(shipment_id),
                     str(order_id) if order_id is not None else None,
                     buyer_name, product_summary, fmt, printer, sheets,
-                    ok, status, error,
+                    ok, status, error, account,
                 ),
             )
             conn.commit()
@@ -284,6 +310,147 @@ def count_risk() -> int:
         finally:
             conn.close()
     return int(n)
+
+
+# --- Cuentas / tiendas (multi-proveedor) -------------------------------------
+_ACCOUNT_COLS = (
+    "id", "provider", "name", "site", "app_id", "client_secret", "redirect_uri",
+    "access_token", "refresh_token", "token_expires_at", "seller_id",
+    "nickname", "enabled", "created",
+)
+_ACCOUNT_ENC = {"client_secret", "access_token", "refresh_token"}
+
+
+def _row_to_account(row) -> dict:
+    d = dict(zip(_ACCOUNT_COLS, row))
+    for k in _ACCOUNT_ENC:
+        if d.get(k):
+            try:
+                d[k] = _fernet.decrypt(d[k].encode()).decode()
+            except Exception:
+                d[k] = None
+    d["enabled"] = bool(d["enabled"])
+    return d
+
+
+def list_accounts() -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT " + ", ".join(_ACCOUNT_COLS) + " FROM accounts ORDER BY created"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [_row_to_account(r) for r in rows]
+
+
+def get_account(account_id: str) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT " + ", ".join(_ACCOUNT_COLS) + " FROM accounts WHERE id = ?",
+                (account_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    return _row_to_account(row) if row else None
+
+
+def upsert_account(account_id: str, **fields) -> None:
+    """Crea o actualiza una cuenta. Cifra secret/tokens. Solo toca los campos dados."""
+    data = {}
+    for k, v in fields.items():
+        if k not in _ACCOUNT_COLS:
+            continue
+        if k in _ACCOUNT_ENC and v is not None:
+            v = _fernet.encrypt(v.encode()).decode()
+        data[k] = v
+    with _lock:
+        conn = _connect()
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+            if exists:
+                if data:
+                    sets = ", ".join(f"{k} = ?" for k in data)
+                    conn.execute(f"UPDATE accounts SET {sets} WHERE id = ?",
+                                 (*data.values(), account_id))
+            else:
+                data.setdefault("provider", "ml")
+                data.setdefault("enabled", 1)
+                data.setdefault("created", int(time.time()))
+                data["id"] = account_id
+                cols = ", ".join(data)
+                ph = ", ".join("?" for _ in data)
+                conn.execute(f"INSERT INTO accounts ({cols}) VALUES ({ph})",
+                             tuple(data.values()))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def update_account_tokens(account_id: str, access_token: str, refresh_token: Optional[str],
+                          token_expires_at: int, seller_id: Optional[str] = None,
+                          nickname: Optional[str] = None) -> None:
+    fields = {"access_token": access_token, "token_expires_at": token_expires_at}
+    if refresh_token:
+        fields["refresh_token"] = refresh_token
+    if seller_id is not None:
+        fields["seller_id"] = seller_id
+    if nickname is not None:
+        fields["nickname"] = nickname
+    upsert_account(account_id, **fields)
+
+
+def clear_account_tokens(account_id: str) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE accounts SET access_token=NULL, refresh_token=NULL,"
+                " token_expires_at=NULL, seller_id=NULL, nickname=NULL WHERE id=?",
+                (account_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def set_account_enabled(account_id: str, enabled: bool) -> None:
+    upsert_account(account_id, enabled=1 if enabled else 0)
+
+
+def delete_account(account_id: str) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def migrate_single_account() -> None:
+    """Si hay tokens de la versión de una sola cuenta, crea la cuenta ML."""
+    import uuid
+    if list_accounts():
+        return
+    app_id = get_value(APP_ID)
+    refresh = get_value(REFRESH_TOKEN)
+    if not (app_id or refresh):
+        return
+    upsert_account(
+        uuid.uuid4().hex[:12], provider="ml",
+        name=get_value(SELLER_NICKNAME) or "Mercado Libre",
+        site="MLM", app_id=app_id, client_secret=get_value(CLIENT_SECRET),
+        redirect_uri=get_value(REDIRECT_URI),
+        access_token=get_value(ACCESS_TOKEN), refresh_token=refresh,
+        token_expires_at=int(get_value(TOKEN_EXPIRES_AT) or 0),
+        seller_id=get_value(SELLER_ID), nickname=get_value(SELLER_NICKNAME),
+        enabled=1,
+    )
 
 
 def recent_printed_shipment_ids(within_seconds: int = 600) -> set[str]:

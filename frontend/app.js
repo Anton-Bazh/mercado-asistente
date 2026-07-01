@@ -16,6 +16,15 @@ const state = {
   cups: false,
   batch: null,           // estado del lote en curso (progreso)
   riskTotal: 0,          // etiquetas en riesgo (para el aviso)
+  auto: null,            // estado del modo automático (reglas)
+  autoView: 'basica',    // 'basica' | 'avanzada'
+  rulesDraft: null,      // copia de trabajo de las reglas (editor)
+  manualSel: new Set(),  // pedidos multi-unidad seleccionados (Separación)
+  accountsMeta: [],      // tiendas presentes en la cola (para el filtro)
+  ordersErrors: [],      // tiendas que fallaron al leer
+  storeFilter: 'all',    // filtro de tienda en la Cola
+  accounts: [],          // cuentas configuradas (pestaña Cuentas)
+  providers: [],         // catálogo de proveedores
   lastSync: null,
   logFilter: 'todos',
   histFilter: { from: '', to: '', format: '', result: '' },
@@ -24,7 +33,8 @@ const state = {
 
 const TITLES = {
   cola: ['Cola en tiempo real', 'Elige impresora y formato arriba; imprime seleccionadas o todo lo pendiente'],
-  automatico: ['Impresión automática', 'El servidor imprime solo, por horario y solo hojas completas'],
+  separacion: ['Separación', 'Pedidos multi-unidad para gestión manual (separar o imprimir)'],
+  automatico: ['Impresión automática', 'El servidor imprime solo, según las reglas de la semana'],
   dispositivos: ['Dispositivos', 'Destino de impresión disponible'],
   conexion: ['Conexión Mercado Libre', 'Gestión de la integración con la API'],
   historial: ['Historial de impresión', 'Registro persistente de todas las etiquetas impresas'],
@@ -56,8 +66,12 @@ function showBanner(msg, type = 'info') {
   clearTimeout(showBanner._t);
   showBanner._t = setTimeout(() => { el.style.display = 'none'; }, 6000);
 }
-// Pool de pendientes por imprimir (lo marca Mercado Libre vía backend).
-function pendingPool() { return state.orders.filter(o => o.pending); }
+// Filtro por tienda (Cola). 'all' = todas.
+function inStore(o) { return state.storeFilter === 'all' || String(o.account_id) === String(state.storeFilter); }
+// Pool de pendientes por imprimir (excluye multi-unidad → van a Separación).
+function pendingPool() { return state.orders.filter(o => o.pending && !o.multi_unit && inStore(o)); }
+// Multi-unidad pendientes: gestión manual (separar/imprimir) en «Separación».
+function manualList() { return state.orders.filter(o => o.pending && o.multi_unit); }
 // Próximos = pendientes aún no seleccionados; A imprimir = pendientes seleccionados.
 function nextList() { return pendingPool().filter(o => !state.selected.has(String(o.shipment_id))); }
 function selectedList() { return pendingPool().filter(o => state.selected.has(String(o.shipment_id))); }
@@ -67,13 +81,14 @@ function productSummary(o) {
   const extra = o.products.length > 1 ? ` +${o.products.length - 1}` : '';
   return `${p.title} x${p.quantity}${extra}`;
 }
-// Metadatos por envío para el historial (JSON keyed por shipment_id).
+// Metadatos por envío para impresión/historial (JSON keyed por shipment_id).
 function buildMeta(orders) {
   const m = {};
   for (const o of orders) {
     m[String(o.shipment_id)] = {
       order_id: o.order_id, buyer_name: o.buyer_name,
       product_summary: productSummary(o),
+      account_id: o.account_id, account_name: o.account_name,
     };
   }
   return JSON.stringify(m);
@@ -319,21 +334,36 @@ function renderBatch() {
 }
 
 // ===== Render: Cola (kanban de 3 columnas) =====
+function storeChip(o) {
+  if (!o.account_name || state.accountsMeta.length < 2) return '';
+  return ` · <span style="color:var(--accent);font-weight:600">${esc(o.account_name)}</span>`;
+}
 function colaItemHtml(o, kind) {
   const prod = (o.products && o.products[0]) || { title:'—' };
   const sid = String(o.shipment_id);
   if (kind === 'next') {
     return `<div class="q-item" style="cursor:pointer" title="Marcar para imprimir" data-sid="${esc(sid)}" data-act="add">
       <span class="chk"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" style="visibility:hidden"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
-      <div style="flex:1;min-width:0"><div class="q-title">${esc(prod.title)}</div><div class="q-sub">${esc(o.buyer_name)} · #${esc(o.order_id)}</div></div>
+      <div style="flex:1;min-width:0"><div class="q-title">${esc(prod.title)}</div><div class="q-sub">${esc(o.buyer_name)} · #${esc(o.order_id)}${storeChip(o)}</div></div>
     </div>`;
   }
   // seleccionadas
   return `<div class="q-item" data-sid="${esc(sid)}">
     <span class="chk on"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
-    <div style="flex:1;min-width:0"><div class="q-title">${esc(prod.title)}</div><div class="q-sub">${esc(o.buyer_name)} · #${esc(o.order_id)}</div></div>
+    <div style="flex:1;min-width:0"><div class="q-title">${esc(prod.title)}</div><div class="q-sub">${esc(o.buyer_name)} · #${esc(o.order_id)}${storeChip(o)}</div></div>
     <button class="xbtn" title="Quitar de la selección" data-sid="${esc(sid)}" data-act="remove">✕</button>
   </div>`;
+}
+function renderStoreFilter() {
+  const sel = $('store-filter'); const wrap = $('store-filter-wrap');
+  if (!sel) return;
+  const metas = state.accountsMeta || [];
+  wrap.style.display = metas.length >= 2 ? 'flex' : 'none';   // solo si hay varias tiendas
+  const opts = ['<option value="all">Todas</option>']
+    .concat(metas.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`));
+  sel.innerHTML = opts.join('');
+  if (state.storeFilter !== 'all' && !metas.some(a => String(a.id) === String(state.storeFilter))) state.storeFilter = 'all';
+  sel.value = state.storeFilter;
 }
 const HIST_STATUS = {
   ok:      ['#eaf6ef','#15824a','✓','Impresa'],
@@ -362,6 +392,9 @@ function renderCola() {
   for (const id of [...state.selected]) if (!present.has(id)) state.selected.delete(id);
 
   $('nav-queue-count').textContent = pend.length;
+  const mlist = manualList();
+  const mbadge = $('nav-manual-count');
+  if (mbadge) { mbadge.textContent = mlist.length; mbadge.style.display = mlist.length ? 'inline-block' : 'none'; }
   $('kpi-pendientes').textContent = pend.length;
   $('kpi-encola').textContent = sel.length;
   $('kpi-formato').textContent = state.format.toUpperCase();
@@ -392,6 +425,7 @@ function renderCola() {
     : idle('Aún no imprimes nada hoy.');
 
   renderFormatSeg();
+  renderStoreFilter();
   updatePrinterStatus();
   renderBatch();
   renderRiskAlert();
@@ -645,46 +679,60 @@ async function addDeviceByUri(dev) {
   } catch (e) { showBanner('No se pudo agregar: ' + e.message, 'error'); }
 }
 
-// ===== Render: Conexión =====
+// ===== Cuentas / tiendas =====
+const PROVIDER_LABEL = { ml:'Mercado Libre', walmart:'Walmart', tiktok:'TikTok Shop' };
 function fmtToken(sec) {
   if (sec == null) return '—';
-  if (sec <= 0) return 'Expirado';
-  if (sec >= 3600) { const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60); return `Expira en ${h}h ${m}m`; }
-  const m = Math.floor(sec/60), s = sec%60; return `Expira en ${m}:${String(s).padStart(2,'0')} min`;
+  if (sec <= 0) return 'Token expirado';
+  if (sec >= 3600) { const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60); return `token ${h}h ${m}m`; }
+  const m = Math.floor(sec/60); return `token ${m} min`;
+}
+async function loadAccounts() {
+  try { const d = await api('/api/accounts'); state.accounts = d.accounts || []; } catch { state.accounts = []; }
+  if (!state.providers.length) {
+    try { const p = await api('/api/providers'); state.providers = p.providers || []; } catch {}
+  }
 }
 function renderConexion() {
-  const st = state.status;
-  $('conn-site').textContent = st.site || '—';
-  $('conn-account').textContent = st.connected ? `${st.nickname || 'vendedor'} · ID ${st.seller_id || '—'}` : 'Sin conectar';
-
-  // pill cuenta
-  const [pbg,pfg,pdot,plabel] = st.connected
-    ? ['#eaf6ef','#15824a','#1ba85b','API conectada']
-    : st.configured ? ['#fbf2dd','#b07400','#e8a200','Configurado · sin conectar']
-                    : ['#eef0f3','#6a7280','#aab0bb','Sin configurar'];
-  const p2 = $('conn-pill-2'); p2.style.background=pbg; p2.style.color=pfg;
-  p2.querySelector('.pdot').style.background=pdot; $('conn-pill-2-label').textContent=plabel;
-
-  // token
-  const tk = $('stat-token');
-  tk.textContent = st.connected ? fmtToken(st.token_expires_in) : '—';
-  tk.style.color = (st.token_expires_in==null) ? 'var(--muted)' : st.token_expires_in<300 ? '#d33a3a' : st.token_expires_in<900 ? '#c77700' : '#15a05a';
-  $('stat-sync').textContent = state.lastSync ? 'hace ' + Math.max(0, Math.round((Date.now()-state.lastSync)/1000)) + ' s' : '—';
-  $('stat-queue').textContent = state.orders.length;
-
-  // botones
-  $('btn-connect').disabled = !st.configured || st.connected;
-  $('btn-disconnect').disabled = !st.connected;
-  $('btn-renew').disabled = !st.connected;
-  $('btn-sync').disabled = !st.connected;
+  const box = $('accounts-list'); if (!box) return;
+  if (!state.accounts.length) {
+    box.innerHTML = `<div class="card empty" style="padding:34px"><span style="font-size:13px;font-weight:500">No hay tiendas configuradas.</span><span style="font-size:12px">Pulsa «Agregar tienda» para conectar tu primera cuenta.</span></div>`;
+    return;
+  }
+  box.innerHTML = state.accounts.map(a => {
+    const [bg,fg,dot,label] = a.connected
+      ? ['#eaf6ef','#15824a','#1ba85b','Conectada']
+      : a.has_secret ? ['#fbf2dd','#b07400','#e8a200','Configurada · sin conectar']
+                     : ['#eef0f3','#6a7280','#aab0bb','Sin configurar'];
+    const tok = a.connected ? ' · ' + fmtToken(a.token_expires_in) : '';
+    return `<div class="card" style="padding:16px 18px${a.enabled?'':';opacity:.6'}">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div style="min-width:0">
+          <div style="font-size:14px;font-weight:700">${esc(a.name||'Tienda')} <span style="font-size:11px;font-weight:600;color:var(--muted2)">· ${esc(PROVIDER_LABEL[a.provider]||a.provider)}</span></div>
+          <div style="font-size:12px;color:var(--muted);font-family:var(--mono)">${a.nickname?esc(a.nickname)+' · ':''}${a.seller_id?'ID '+esc(a.seller_id):esc(a.app_id||'')}${esc(tok)}</div>
+        </div>
+        <span class="pill" style="background:${bg};color:${fg};font-size:12px;padding:6px 11px"><span class="pdot" style="width:8px;height:8px;background:${dot}"></span>${label}</span>
+      </div>
+      <div class="btn-row" style="margin-top:14px;flex-wrap:wrap">
+        <button class="btn btn-accent" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="connect">${a.connected?'Reconectar':'Conectar'}</button>
+        ${a.connected?`<button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="refresh">Renovar token</button>`:''}
+        <button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="edit">Editar</button>
+        <button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="toggle">${a.enabled?'Pausar':'Activar'}</button>
+        <button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="manual">Canjear code</button>
+        ${a.connected?`<button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="disconnect">Desconectar</button>`:''}
+        <button class="btn btn-danger" style="padding:7px 11px;font-size:12px" data-acc="${esc(a.id)}" data-act="delete">✕</button>
+      </div>
+    </div>`;
+  }).join('');
 }
 
-// ===== Modo automático =====
+// ===== Modo automático (reglas por horario) =====
 const AUTO_STATE = {
   off:               ['#aab0bb', 'Desactivado'],
   printing:          ['#2f6bf0', 'Imprimiendo'],
-  waiting_window:    ['#b07400', 'Fuera de horario'],
-  waiting_interval:  ['#15a05a', 'En horario'],
+  paused:            ['#8a92a0', 'En pausa'],
+  idle_ok:           ['#15a05a', 'Activo · sin pendientes'],
+  waiting_interval:  ['#15a05a', 'Activo'],
   waiting_fill:      ['#b07400', 'Esperando etiquetas'],
   no_conn:           ['#c43232', 'Sin conexión'],
   no_printer:        ['#c43232', 'Sin impresora'],
@@ -692,6 +740,12 @@ const AUTO_STATE = {
   no_size:           ['#b07400', 'Falta calibrar'],
   error:             ['#c43232', 'Error'],
 };
+const DAYS_ES = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
+const MODE_COLOR = { ahorro:'#15824a', forzar:'#b07400', pausa:'#c4c9d2' };
+const MODE_NAME = { ahorro:'Ahorro', forzar:'Forzar', pausa:'Pausa' };
+function hmMin(s) { const [h,m] = (s||'0:0').split(':'); return (+h)*60 + (+m); }
+function minHm(n) { return String(Math.floor(n/60)).padStart(2,'0') + ':' + String(n%60).padStart(2,'0'); }
+
 async function loadAuto() {
   try { state.auto = await api('/api/auto'); } catch { state.auto = null; }
   const dot = $('auto-nav-dot');
@@ -700,17 +754,16 @@ async function loadAuto() {
 function fillAutoForm() {
   if (!state.auto) return;
   const active = document.activeElement;
-  const inForm = active && ['auto-enabled','auto-start','auto-end','auto-interval'].includes(active.id);
-  if (inForm) return;                     // no pisar mientras el usuario edita
+  if (active && ['auto-enabled','auto-interval','auto-threshold'].includes(active.id)) return;
   const c = state.auto.config;
   $('auto-enabled').checked = c.enabled;
-  $('auto-start').value = c.start;
-  $('auto-end').value = c.end;
   $('auto-interval').value = c.interval_min;
+  $('auto-threshold').value = c.multiunit_threshold;
 }
 function renderAuto() {
+  if (!state.auto) return;
   fillAutoForm();
-  const s = state.auto || { state:'off', message:'—', config:{ enabled:false } };
+  const s = state.auto;
   const [color, label] = AUTO_STATE[s.state] || AUTO_STATE.off;
   const on = s.config.enabled;
   $('auto-dot').style.background = color;
@@ -720,8 +773,71 @@ function renderAuto() {
   pill.style.background = on ? 'rgba(47,107,240,.1)' : '#eef0f3';
   pill.style.color = on ? 'var(--accent)' : '#6a7280';
   pill.querySelector('.pdot').style.background = on ? color : '#aab0bb';
-  $('auto-pill-label').textContent = on ? label : 'Desactivado';
+  const modeTxt = s.mode_now ? ` · ahora: ${MODE_NAME[s.mode_now]||s.mode_now}` : '';
+  $('auto-pill-label').textContent = (on ? label : 'Desactivado') + (on ? modeTxt : '');
+  renderAutoGrid(s.config.rules);
+  if (!state.rulesDraft) state.rulesDraft = JSON.parse(JSON.stringify(s.config.rules));
+  if (state.autoView === 'avanzada') renderAutoEditor();
   renderAutoReqs();
+}
+function autoDayBar(segs) {
+  const sorted = [...(segs||[])].sort((a,b) => hmMin(a.start) - hmMin(b.start));
+  const parts = []; let cur = 0;
+  for (const s of sorted) {
+    const a = hmMin(s.start), b = hmMin(s.end);
+    if (a > cur) parts.push({ mode:'pausa', a:cur, b:a, label:'' });
+    parts.push({ mode:s.mode, a, b, label:s.label||'' });
+    cur = b;
+  }
+  if (cur < 1440) parts.push({ mode:'pausa', a:cur, b:1440, label:'' });
+  return parts.map(p => `<div title="${minHm(p.a)}–${minHm(p.b)} · ${MODE_NAME[p.mode]}${p.label?' ('+esc(p.label)+')':''}" style="flex:${p.b-p.a} 0 0;background:${MODE_COLOR[p.mode]};height:22px"></div>`).join('');
+}
+function renderAutoGrid(rules) {
+  const box = $('auto-grid'); if (!box) return;
+  const days = (rules && rules.days) || {};
+  const axis = `<div style="display:flex;align-items:center;gap:10px;margin-top:4px"><span style="width:34px"></span><div style="flex:1;display:flex;justify-content:space-between;font-size:10px;color:var(--label);font-family:var(--mono)"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div></div>`;
+  box.innerHTML = DAYS_ES.map((n,d) => `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+      <span style="width:34px;font-size:12px;font-weight:600;color:var(--ink2)">${n}</span>
+      <div style="flex:1;display:flex;border-radius:5px;overflow:hidden;border:1px solid var(--line)">${autoDayBar(days[String(d)])}</div>
+    </div>`).join('') + axis;
+}
+function autoSegRow(s) {
+  s = s || { start:'00:00', end:'23:59', mode:'ahorro', label:'' };
+  const opt = m => `<option value="${m}"${s.mode===m?' selected':''}>${MODE_NAME[m]}</option>`;
+  return `<div class="auto-seg" style="display:flex;gap:7px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+    <input type="time" class="seg-start hist-inp" value="${esc(s.start)}">
+    <span style="color:var(--muted)">→</span>
+    <input type="time" class="seg-end hist-inp" value="${esc(s.end)}">
+    <select class="seg-mode hist-inp">${opt('ahorro')}${opt('forzar')}${opt('pausa')}</select>
+    <input type="text" class="seg-label hist-inp" placeholder="etiqueta (opcional)" value="${esc(s.label||'')}" style="flex:1;min-width:120px">
+    <button type="button" class="xbtn auto-del" title="Quitar tramo">✕</button>
+  </div>`;
+}
+function renderAutoEditor() {
+  const box = $('auto-editor'); if (!box) return;
+  const days = (state.rulesDraft && state.rulesDraft.days) || {};
+  box.innerHTML = DAYS_ES.map((n,d) => `
+    <div style="border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px">
+      <div style="font-weight:600;margin-bottom:8px">${n}</div>
+      <div class="auto-day-rows" data-day="${d}">${(days[String(d)]||[]).map(autoSegRow).join('')}</div>
+      <button type="button" class="btn btn-ghost auto-add" data-day="${d}" style="padding:5px 10px;font-size:12px;margin-top:4px">+ Agregar tramo</button>
+    </div>`).join('');
+}
+function collectRules() {
+  const days = {};
+  document.querySelectorAll('.auto-day-rows').forEach(dc => {
+    const segs = [];
+    dc.querySelectorAll('.auto-seg').forEach(row => {
+      const start = row.querySelector('.seg-start').value;
+      const end = row.querySelector('.seg-end').value;
+      const mode = row.querySelector('.seg-mode').value;
+      const label = row.querySelector('.seg-label').value;
+      if (start && end) segs.push({ start, end, mode, label });
+    });
+    days[dc.dataset.day] = segs;
+  });
+  return { days };
 }
 function renderAutoReqs() {
   const box = $('auto-reqs'); if (!box) return;
@@ -737,49 +853,90 @@ function renderAutoReqs() {
       <div style="min-width:0"><div style="font-weight:${ok?'500':'600'};color:${ok?'var(--ink2)':'var(--text)'}">${esc(txt)}</div>${ok?'':`<div style="font-size:12px;color:var(--muted)">${esc(hint)}</div>`}</div>
     </div>`).join('');
 }
+async function saveAuto(rulesData) {
+  const fd = new FormData();
+  fd.append('enabled', $('auto-enabled').checked ? '1' : '0');
+  fd.append('interval_min', $('auto-interval').value || '30');
+  fd.append('multiunit_threshold', $('auto-threshold').value || '1');
+  if (rulesData) fd.append('rules', JSON.stringify(rulesData));
+  return api('/api/auto', { method:'POST', body:fd });
+}
+async function loadPreset() {
+  try {
+    const d = await api('/api/auto/default');
+    state.rulesDraft = d;
+    await saveAuto(d); await loadAuto(); renderAuto();
+    showBanner('Reglas recomendadas cargadas.', 'success');
+    log('OK','automatico','Reglas recomendadas cargadas.');
+  } catch (e) { showBanner('No se pudo: ' + e.message, 'error'); }
+}
+
+// ===== Separación (multi-unidad) =====
+function renderSeparacion() {
+  const list = manualList();
+  const badge = $('nav-manual-count');
+  if (badge) { badge.textContent = list.length; badge.style.display = list.length ? 'inline-block' : 'none'; }
+  const cnt = $('manual-count'); if (cnt) cnt.textContent = list.length;
+  const box = $('manual-rows'); if (!box) return;
+  // limpia selección de los que ya no están
+  const present = new Set(list.map(o => String(o.shipment_id)));
+  for (const id of [...state.manualSel]) if (!present.has(id)) state.manualSel.delete(id);
+  if (!list.length) { box.innerHTML = `<div class="empty" style="padding:44px 0"><span>No hay pedidos multi-unidad pendientes.</span></div>`; return; }
+  box.innerHTML = list.map(o => {
+    const sid = String(o.shipment_id), on = state.manualSel.has(sid);
+    const prod = (o.products && o.products[0]) || { title:'—' };
+    return `<div class="log-row" style="gap:12px">
+      <label style="display:flex;flex:0 0 auto"><input type="checkbox" class="manual-chk" data-sid="${esc(sid)}" ${on?'checked':''} style="width:16px;height:16px;accent-color:var(--accent)"></label>
+      <span style="width:92px;font-family:var(--mono);font-size:12px;color:var(--ink3)">#${esc(o.order_id)}</span>
+      <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(prod.title)}</span>
+      <span class="chip" style="background:#fbf2dd;color:#b07400;flex:0 0 auto">${esc(o.units)} uds</span>
+      <span style="width:160px;color:var(--ink3);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(o.buyer_name)}</span>
+    </div>`;
+  }).join('');
+  const allChk = $('manual-all'); if (allChk) allChk.checked = list.length > 0 && list.every(o => state.manualSel.has(String(o.shipment_id)));
+}
 
 // ===== Topbar / estado =====
 function updateConnPills() {
   const st = state.status;
+  const n = st.accounts_connected || 0;
   const [bg,fg,dot,label] = st.connected
-    ? ['#eaf6ef','#15824a','#1ba85b','API conectada']
-    : st.configured ? ['#fbf2dd','#b07400','#e8a200','Sin conectar']
-                    : ['#eef0f3','#6a7280','#aab0bb','Sin configurar'];
+    ? ['#eaf6ef','#15824a','#1ba85b', n > 1 ? `${n} tiendas` : 'Tienda conectada']
+    : (st.accounts_total ? ['#fbf2dd','#b07400','#e8a200','Sin conectar']
+                         : ['#eef0f3','#6a7280','#aab0bb','Sin tiendas']);
   const pill = $('conn-pill'); pill.style.background=bg; pill.style.color=fg;
   pill.querySelector('.pdot').style.background=dot; $('conn-pill-label').textContent=label;
 }
 async function refreshStatus() {
-  try {
-    state.status = await api('/api/status');
-    if (state.status.token_expires_in != null) state._tokenLocal = state.status.token_expires_in;
-  } catch (e) { /* silencioso */ }
+  try { state.status = await api('/api/status'); } catch (e) { /* silencioso */ }
   updateConnPills();
-  if (state.tab === 'conexion') renderConexion();
 }
 
 // ===== Datos =====
 async function loadOrders(opts = {}) {
-  if (!state.status.connected) { renderCola(); return; }
+  if (!state.status.connected) { state.orders = []; renderCola(); return; }
   try {
     const data = await api('/api/orders');
     const newOrders = data.orders || [];
     if (typeof data.printed_today === 'number') state.printedToday = data.printed_today;
+    state.accountsMeta = data.accounts || [];
+    state.ordersErrors = data.errors || [];
     const newIds = new Set(newOrders.map(o => String(o.shipment_id)));
     const added = state._orderIds ? newOrders.filter(o => !state._orderIds.has(String(o.shipment_id))).length : 0;
     const removed = state._orderIds ? [...state._orderIds].filter(id => !newIds.has(id)).length : 0;
     state.orders = newOrders; state._orderIds = newIds; state.lastSync = Date.now();
-    if (opts.manual) log('OK', 'cola', `Cola sincronizada · ${newOrders.length} venta(s) lista(s).`);
+    if (opts.manual) log('OK', 'cola', `Cola sincronizada · ${newOrders.length} venta(s) de ${state.accountsMeta.length} tienda(s).`);
     else if (state._ordersInit) {
       if (added) log('INFO', 'cola', `${added} venta(s) nueva(s) lista(s) para enviar.`);
       if (removed) log('INFO', 'cola', `${removed} venta(s) salieron de la cola (enviadas/canceladas).`);
     }
+    for (const er of state.ordersErrors) log('WARN', 'cola', `Tienda «${er.account_name}»: ${er.error}`);
     state._ordersInit = true;
   } catch (e) {
     if (opts.manual) showBanner('No se pudieron cargar las ventas: ' + e.message, 'error');
     log('ERROR', 'cola', 'Error al sincronizar la cola: ' + e.message);
   }
   renderCola();
-  if (state.tab === 'conexion') renderConexion();
 }
 
 // ===== Navegación =====
@@ -790,37 +947,18 @@ function go(tab) {
   $('page-title').textContent = TITLES[tab][0];
   $('page-sub').textContent = TITLES[tab][1];
   if (tab === 'cola') renderCola();
+  else if (tab === 'separacion') { loadOrders().then(renderSeparacion); }
   else if (tab === 'automatico') { loadAuto().then(renderAuto); }
   else if (tab === 'dispositivos') loadPrinters({ force: true });
-  else if (tab === 'conexion') renderConexion();
+  else if (tab === 'conexion') { loadAccounts().then(renderConexion); }
   else if (tab === 'historial') renderHistorial();
   else if (tab === 'logs') renderLogs();
-}
-
-// ===== Conexión: acciones =====
-async function loadConfig() {
-  try {
-    const c = await api('/api/config');
-    $('app_id').value = c.app_id || '';
-    if (c.redirect_uri) $('redirect_uri').value = c.redirect_uri;
-    if (c.has_secret) $('client_secret').placeholder = '•••• (guardado — vacío para conservar)';
-  } catch {}
 }
 
 // ===== Init =====
 function init() {
   // reloj
-  const tick = () => {
-    $('clock').textContent = new Date().toLocaleTimeString('es-MX', { hour12:false });
-    if (state.status.connected && state._tokenLocal != null) {
-      state._tokenLocal = Math.max(0, state._tokenLocal - 1);
-      state.status.token_expires_in = state._tokenLocal;
-      if (state.tab === 'conexion') {
-        const tk = $('stat-token'); tk.textContent = fmtToken(state._tokenLocal);
-        tk.style.color = state._tokenLocal<300?'#d33a3a':state._tokenLocal<900?'#c77700':'#15a05a';
-      }
-    }
-  };
+  const tick = () => { $('clock').textContent = new Date().toLocaleTimeString('es-MX', { hour12:false }); };
   tick(); setInterval(tick, 1000);
 
   // navegación
@@ -850,6 +988,9 @@ function init() {
                      products: b.dataset.prod ? [{ title: b.dataset.prod, quantity: 1 }] : [] }, b.dataset.fmt);
   });
 
+  // filtro de tienda
+  $('store-filter').addEventListener('change', e => { state.storeFilter = e.target.value; state.selected.clear(); renderCola(); });
+
   // formato (toggle) y control del lote
   $('format-seg').addEventListener('click', e => { const b = e.target.closest('[data-format]'); if (b) setFormat(b.dataset.format); });
   $('btn-batch-stop').addEventListener('click', async () => { await api('/api/batch/stop', { method:'POST' }).catch(()=>{}); });
@@ -859,17 +1000,81 @@ function init() {
     window.open('/api/layout-preview?count=' + count, '_blank', 'noopener');
   });
 
-  // automático
-  $('auto-form').addEventListener('submit', async e => {
-    e.preventDefault();
-    try {
-      const r = await api('/api/auto', { method:'POST', body:new FormData(e.target) });
-      await loadAuto(); renderAuto();
+  // automático: activar / parámetros
+  $('auto-enabled').addEventListener('change', async () => {
+    try { const r = await saveAuto(); await loadAuto(); renderAuto();
       showBanner(r.config.enabled ? 'Impresión automática activada.' : 'Impresión automática desactivada.', 'success');
-      log('OK','automatico', r.config.enabled
-        ? `Automático activado · ${r.config.start}–${r.config.end}, cada ${r.config.interval_min} min.`
-        : 'Automático desactivado.');
-    } catch (err) { showBanner('No se pudo guardar: ' + err.message, 'error'); }
+      log('OK','automatico', r.config.enabled ? 'Automático activado.' : 'Automático desactivado.');
+    } catch (e) { showBanner('No se pudo: ' + e.message, 'error'); $('auto-enabled').checked = !$('auto-enabled').checked; }
+  });
+  $('auto-interval').addEventListener('change', async () => {
+    try { await saveAuto(); showBanner('Intervalo guardado.', 'success'); } catch (e) { showBanner(e.message, 'error'); }
+  });
+  $('auto-threshold').addEventListener('change', async () => {
+    try { await saveAuto(); await loadOrders(); renderSeparacion(); showBanner('Umbral guardado.', 'success'); } catch (e) { showBanner(e.message, 'error'); }
+  });
+  // vista básica / avanzada
+  $('auto-view-seg').addEventListener('click', e => {
+    const b = e.target.closest('[data-view]'); if (!b) return;
+    state.autoView = b.dataset.view;
+    document.querySelectorAll('#auto-view-seg .seg-btn').forEach(x => x.classList.toggle('active', x.dataset.view === state.autoView));
+    $('auto-basic').style.display = state.autoView === 'basica' ? 'block' : 'none';
+    $('auto-advanced').style.display = state.autoView === 'avanzada' ? 'block' : 'none';
+    if (state.autoView === 'avanzada') { state.rulesDraft = JSON.parse(JSON.stringify(state.auto.config.rules)); renderAutoEditor(); }
+  });
+  // editor de reglas
+  $('auto-editor').addEventListener('click', e => {
+    const add = e.target.closest('.auto-add');
+    if (add) { document.querySelector(`.auto-day-rows[data-day="${add.dataset.day}"]`).insertAdjacentHTML('beforeend', autoSegRow()); return; }
+    const del = e.target.closest('.auto-del');
+    if (del) { del.closest('.auto-seg').remove(); return; }
+  });
+  $('auto-save').addEventListener('click', async () => {
+    try { await saveAuto(collectRules()); await loadAuto(); renderAuto();
+      showBanner('Reglas guardadas.', 'success'); log('OK','automatico','Reglas de horario guardadas.');
+    } catch (e) { showBanner('No se pudieron guardar: ' + e.message, 'error'); }
+  });
+  $('auto-preset').addEventListener('click', loadPreset);
+  $('auto-preset-2').addEventListener('click', loadPreset);
+
+  // separación (multi-unidad)
+  $('manual-all').addEventListener('change', e => {
+    const list = manualList();
+    if (e.target.checked) list.forEach(o => state.manualSel.add(String(o.shipment_id)));
+    else state.manualSel.clear();
+    renderSeparacion();
+  });
+  $('manual-rows').addEventListener('change', e => {
+    const c = e.target.closest('.manual-chk'); if (!c) return;
+    if (c.checked) state.manualSel.add(c.dataset.sid); else state.manualSel.delete(c.dataset.sid);
+    renderSeparacion();
+  });
+  $('manual-print').addEventListener('click', () => {
+    const sel = manualList().filter(o => state.manualSel.has(String(o.shipment_id)));
+    if (!sel.length) { showBanner('Selecciona al menos un pedido.', 'info'); return; }
+    startBatch(sel, 'Multi-unidad (manual)');
+    state.manualSel.clear();
+  });
+  $('manual-split').addEventListener('click', async () => {
+    const sel = manualList().filter(o => state.manualSel.has(String(o.shipment_id)));
+    if (!sel.length) { showBanner('Selecciona al menos un pedido.', 'info'); return; }
+    if (!confirm(`Separar ${sel.length} pedido(s) en Mercado Libre.\n\nEs IRREVERSIBLE y notifica al comprador. ¿Continuar?`)) return;
+    const qStr = prompt('¿Cuántas unidades separar a un segundo paquete (por pedido)?', '1');
+    const q = parseInt(qStr, 10); if (!q || q < 1) return;
+    let ok = 0, fail = 0;
+    for (const o of sel) {
+      const qty = Math.max(1, Math.min(q, (o.units || 2) - 1));
+      try {
+        const fd = new FormData();
+        fd.append('shipment_id', o.shipment_id); fd.append('order_id', o.order_id);
+        fd.append('account_id', o.account_id || '');
+        fd.append('quantity', qty); fd.append('reason', 'DIMENSIONS_EXCEEDED');
+        await api('/api/auto/split', { method:'POST', body:fd }); ok++;
+        log('OK','separacion',`Separado #${o.order_id} (${qty} uds).`);
+      } catch (e) { fail++; log('ERROR','separacion',`Separar #${o.order_id}: ${e.message}`); }
+    }
+    showBanner(`Separadas: ${ok}${fail ? ` · Errores: ${fail}` : ''}`, fail ? 'error' : 'success');
+    state.manualSel.clear(); await loadOrders(); renderSeparacion();
   });
   $('risk-review').addEventListener('click', () => { state.histFilter = { from:'', to:'', format:'', result:'risk' }; go('historial'); const r=$('hist-result'); if(r) r.value='risk'; });
 
@@ -939,29 +1144,77 @@ function init() {
   // logs: filtros (delegación)
   $('log-filters').addEventListener('click', e => { const b = e.target.closest('[data-filter]'); if (b) { state.logFilter = b.dataset.filter; renderLogs(); } });
 
-  // conexión
-  $('btn-sync').addEventListener('click', async () => { await loadOrders({ manual: true }); renderConexion(); showBanner('Cola sincronizada.', 'success'); });
-  $('btn-connect').addEventListener('click', async () => {
-    try { const { authorization_url } = await api('/api/connect'); window.location.href = authorization_url; }
-    catch (e) { showBanner('No se pudo iniciar la conexión: ' + e.message, 'error'); }
-  });
-  $('btn-renew').addEventListener('click', async () => {
-    try { const r = await api('/api/refresh', { method:'POST' }); state.status.token_expires_in = r.token_expires_in; state._tokenLocal = r.token_expires_in; renderConexion(); showBanner('Token renovado.', 'success'); log('OK','conexion','Token de acceso renovado manualmente.'); }
-    catch (e) { showBanner('No se pudo renovar el token: ' + e.message, 'error'); log('ERROR','conexion','Error al renovar el token: ' + e.message); }
-  });
-  $('btn-disconnect').addEventListener('click', async () => {
-    try { await api('/api/disconnect', { method:'POST' }); log('WARN','conexion','Cuenta desconectada por el operador.'); state.orders=[]; state.selected.clear(); await refreshStatus(); renderCola(); renderConexion(); showBanner('Cuenta desconectada.', 'info'); }
-    catch (e) { showBanner('Error al desconectar: ' + e.message, 'error'); }
-  });
-  $('config-form').addEventListener('submit', async e => {
+  // cuentas / tiendas
+  const DEFAULT_REDIRECT = location.origin + '/callback';
+  function openAccForm(acc) {
+    // llena el selector de proveedor (solo disponibles)
+    const sel = $('acc-provider');
+    const avail = state.providers.filter(p => p.available);
+    sel.innerHTML = (avail.length ? avail : [{ id:'ml', label:'Mercado Libre' }])
+      .map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
+    $('acc-form-title').textContent = acc ? `Editar «${acc.name || 'tienda'}»` : 'Agregar tienda';
+    $('acc-id').value = acc ? acc.id : '';
+    $('acc-provider').value = acc ? acc.provider : (avail[0] ? avail[0].id : 'ml');
+    $('acc-name').value = acc ? (acc.name || '') : '';
+    $('acc-app-id').value = acc ? (acc.app_id || '') : '';
+    $('acc-secret').value = '';
+    $('acc-secret').placeholder = acc && acc.has_secret ? '•••• (vacío = conservar)' : '';
+    $('acc-redirect').value = acc ? (acc.redirect_uri || DEFAULT_REDIRECT) : DEFAULT_REDIRECT;
+    $('acc-form-card').style.display = 'block';
+    $('acc-form-card').scrollIntoView({ behavior:'smooth', block:'center' });
+  }
+  $('acc-add-open').addEventListener('click', () => openAccForm(null));
+  $('acc-cancel').addEventListener('click', () => { $('acc-form-card').style.display = 'none'; });
+  $('acc-form').addEventListener('submit', async e => {
     e.preventDefault();
-    try { await api('/api/config', { method:'POST', body:new FormData(e.target) }); $('client_secret').value=''; await loadConfig(); await refreshStatus(); renderConexion(); showBanner('Credenciales guardadas (secreto cifrado).', 'success'); log('OK','conexion','Credenciales de la aplicación guardadas.'); }
-    catch (err) { showBanner('No se pudieron guardar: ' + err.message, 'error'); }
+    try {
+      await api('/api/accounts', { method:'POST', body:new FormData(e.target) });
+      $('acc-form-card').style.display = 'none';
+      await loadAccounts(); renderConexion();
+      showBanner('Tienda guardada.', 'success'); log('OK','cuentas','Tienda guardada.');
+    } catch (err) { showBanner('No se pudo guardar: ' + err.message, 'error'); }
   });
-  $('manual-form').addEventListener('submit', async e => {
+  $('acc-manual-form').addEventListener('submit', async e => {
     e.preventDefault();
-    try { await api('/api/connect/manual', { method:'POST', body:new FormData(e.target) }); $('manual_code').value=''; await refreshStatus(); renderConexion(); await loadOrders({ manual: true }); showBanner('Código canjeado. Cuenta conectada.', 'success'); log('OK','conexion','Cuenta conectada (canje manual de código).'); }
-    catch (err) { showBanner('No se pudo canjear el código: ' + err.message, 'error'); }
+    const id = $('acc-manual-form').dataset.acc, code = $('acc-manual-code').value.trim();
+    if (!id || !code) return;
+    try {
+      const fd = new FormData(); fd.append('code', code);
+      await api(`/api/accounts/${encodeURIComponent(id)}/connect/manual`, { method:'POST', body:fd });
+      $('acc-manual-code').value = ''; $('acc-manual-card').style.display = 'none';
+      await loadAccounts(); await refreshStatus(); renderConexion();
+      showBanner('Código canjeado. Tienda conectada.', 'success');
+    } catch (err) { showBanner('No se pudo canjear: ' + err.message, 'error'); }
+  });
+  $('accounts-list').addEventListener('click', async e => {
+    const b = e.target.closest('[data-acc]'); if (!b) return;
+    const id = b.dataset.acc, act = b.dataset.act;
+    const acc = state.accounts.find(a => a.id === id);
+    try {
+      if (act === 'connect') {
+        const { authorization_url } = await api(`/api/accounts/${encodeURIComponent(id)}/connect`);
+        window.location.href = authorization_url;
+      } else if (act === 'refresh') {
+        await api(`/api/accounts/${encodeURIComponent(id)}/refresh`, { method:'POST' });
+        await loadAccounts(); renderConexion(); showBanner('Token renovado.', 'success');
+      } else if (act === 'disconnect') {
+        await api(`/api/accounts/${encodeURIComponent(id)}/disconnect`, { method:'POST' });
+        await loadAccounts(); await refreshStatus(); renderConexion(); showBanner('Tienda desconectada.', 'info');
+      } else if (act === 'toggle') {
+        const fd = new FormData(); fd.append('enabled', acc.enabled ? '0' : '1');
+        await api(`/api/accounts/${encodeURIComponent(id)}/enabled`, { method:'POST', body:fd });
+        await loadAccounts(); renderConexion();
+      } else if (act === 'edit') {
+        openAccForm(acc);
+      } else if (act === 'manual') {
+        $('acc-manual-form').dataset.acc = id; $('acc-manual-name').textContent = acc.name || 'tienda';
+        $('acc-manual-card').style.display = 'block'; $('acc-manual-card').scrollIntoView({ behavior:'smooth', block:'center' });
+      } else if (act === 'delete') {
+        if (!confirm(`¿Eliminar la tienda «${acc.name || id}»? Se borran sus credenciales.`)) return;
+        await api(`/api/accounts/${encodeURIComponent(id)}`, { method:'DELETE' });
+        await loadAccounts(); await refreshStatus(); renderConexion(); showBanner('Tienda eliminada.', 'info');
+      }
+    } catch (err) { showBanner('Error: ' + err.message, 'error'); }
   });
 
   // sello del sistema
@@ -976,7 +1229,6 @@ function init() {
   go('cola');
   (async () => {
     await loadStamp();
-    await loadConfig();
     await loadPrinters();
     await refreshStatus();
     await loadDoneRecent();
@@ -1002,6 +1254,10 @@ function init() {
         await loadOrders();                         // refresco silencioso de la cola
         await loadDoneRecent();                     // y del mini-historial (Impresos)
         renderCola();
+      }
+      if (state.tab === 'separacion' && state.status.connected && Date.now() - lastOrders > 15000) {
+        lastOrders = Date.now();
+        await loadOrders(); renderSeparacion();
       }
     } catch (_) { /* el siguiente tick reintenta */ }
     finally { ticking = false; }

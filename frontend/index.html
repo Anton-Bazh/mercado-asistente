@@ -189,6 +189,11 @@
         <span class="txt">Cola en tiempo real</span>
         <span class="nav-badge" id="nav-queue-count">0</span>
       </button>
+      <button class="nav-btn" data-tab="separacion">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v6a3 3 0 0 0 3 3h6a3 3 0 0 1 3 3v6"></path><path d="M6 21v-6a3 3 0 0 1 3-3h6a3 3 0 0 0 3-3V3"></path></svg>
+        <span class="txt">Separación</span>
+        <span class="nav-badge" id="nav-manual-count" style="display:none">0</span>
+      </button>
       <button class="nav-btn" data-tab="automatico">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><polyline points="12 7 12 12 15 14"></polyline></svg>
         <span class="txt">Automático</span>
@@ -204,7 +209,7 @@
     <nav>
       <button class="nav-btn" data-tab="conexion">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12a4 4 0 0 1 4-4h2"></path><path d="M16 12a4 4 0 0 1-4 4h-2"></path><circle cx="6" cy="12" r="2.4"></circle><circle cx="18" cy="12" r="2.4"></circle></svg>
-        <span class="txt">Conexión Mercado Libre</span>
+        <span class="txt">Cuentas / Tiendas</span>
       </button>
       <button class="nav-btn" data-tab="historial">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><polyline points="12 7 12 12 15 14"></polyline><path d="M3.5 9a9 9 0 0 1 .3-1"></path></svg>
@@ -275,6 +280,10 @@
                   <button class="seg-btn" data-format="zpl" style="padding:6px 15px">ZPL</button>
                 </div>
               </div>
+              <div style="display:flex;align-items:center;gap:9px" id="store-filter-wrap">
+                <span style="font-size:12px;font-weight:600;color:var(--ink2)">Tienda</span>
+                <select id="store-filter" style="border:1px solid #d8dbe1;border-radius:9px;padding:8px 11px;font:inherit;font-size:13px;outline:none;max-width:200px"><option value="all">Todas</option></select>
+              </div>
               <div class="btn-row" style="margin-left:auto">
                 <button class="btn btn-ghost" id="btn-reload">Actualizar</button>
                 <button class="btn btn-accent" id="btn-print-pending">Imprimir todo lo pendiente (<span id="print-pending-count">0</span>)</button>
@@ -340,6 +349,27 @@
         </div>
       </section>
 
+      <!-- ===== SEPARACIÓN (multi-unidad) ===== -->
+      <section class="tab" data-tab="separacion">
+        <div class="wrap" style="max-width:1000px">
+          <div class="card" style="padding:14px 18px;background:#fbf2dd;border-color:#f0e3b8;color:#7a5b00">
+            <div style="font-size:13px;font-weight:600;margin-bottom:2px">Pedidos multi-unidad — gestión manual</div>
+            <div style="font-size:12.5px;line-height:1.5">Aquí caen los pedidos con más de la cantidad configurada de unidades. <strong>No se imprimen ni se separan solos</strong>: tú eliges cuáles separar en Mercado Libre o imprimir. Separar en ML es <strong>irreversible</strong> y notifica al comprador.</div>
+          </div>
+          <div class="card" style="padding:0;overflow:hidden">
+            <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap">
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><input type="checkbox" id="manual-all" style="width:16px;height:16px;accent-color:var(--accent)"> Seleccionar todo</label>
+              <span class="muted-mono" style="font-size:12px"><span id="manual-count">0</span> pedido(s)</span>
+              <div class="btn-row" style="margin-left:auto">
+                <button class="btn btn-ghost" id="manual-print" style="padding:7px 13px">Imprimir seleccionadas</button>
+                <button class="btn btn-danger" id="manual-split" style="padding:7px 13px">Separar en ML</button>
+              </div>
+            </div>
+            <div id="manual-rows"></div>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== AUTOMÁTICO ===== -->
       <section class="tab" data-tab="automatico">
         <div class="wrap" style="max-width:820px">
@@ -356,26 +386,57 @@
               <span class="pill" id="auto-pill" style="background:#eef0f3;color:#6a7280"><span class="pdot" style="background:#aab0bb"></span><span id="auto-pill-label">Desactivado</span></span>
             </div>
             <div style="margin-top:14px;padding:11px 14px;border-radius:10px;background:#fafbfc;border:1px solid var(--line);font-size:12.5px;color:var(--ink3);line-height:1.5">
-              El servidor imprime solo dentro del horario que definas y <strong>solo cuando hay etiquetas suficientes para llenar al menos una hoja completa</strong> (nunca imprime media hoja; el sobrante espera). <strong>No necesita que nadie tenga la página abierta</strong>: basta con que el servidor y la impresora estén encendidos y haya una impresora predeterminada lista.
+              El servidor sigue las <strong>reglas de la semana</strong> (abajo): en <strong>Ahorro</strong> imprime solo hojas completas; en <strong>Forzar/vaciado</strong> imprime todo aunque no se llene; en <strong>Pausa</strong> acumula. Los pedidos <strong>multi-unidad</strong> nunca se imprimen solos: van a «Separación». <strong>No necesita que nadie tenga la página abierta</strong>: basta con que el servidor y una impresora predeterminada estén listos.
             </div>
           </div>
 
-          <!-- configuración -->
+          <!-- activar + vista + parámetros -->
           <div class="card">
-            <div class="sec-title" style="margin-bottom:16px">Configuración</div>
-            <form id="auto-form">
-              <label class="opt" style="cursor:pointer;margin-bottom:16px">
-                <input type="checkbox" id="auto-enabled" name="enabled" style="width:17px;height:17px;accent-color:var(--accent)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+              <label class="opt" style="cursor:pointer;flex:1;min-width:220px;margin:0">
+                <input type="checkbox" id="auto-enabled" style="width:17px;height:17px;accent-color:var(--accent)">
                 <span style="flex:1;font-weight:600">Activar impresión automática</span>
               </label>
-              <div class="grid-2" style="gap:14px">
-                <div class="field" style="margin-bottom:0"><label>Desde (inicio de ventana)</label><input type="time" id="auto-start" name="start" value="01:00"></div>
-                <div class="field" style="margin-bottom:0"><label>Hasta (fin de ventana)</label><input type="time" id="auto-end" name="end" value="05:00"></div>
+              <div class="seg" id="auto-view-seg">
+                <button type="button" class="seg-btn active" data-view="basica" style="padding:6px 14px">Básica</button>
+                <button type="button" class="seg-btn" data-view="avanzada" style="padding:6px 14px">Avanzada</button>
               </div>
-              <div class="field" style="margin-top:14px;max-width:280px"><label>Revisar cada (minutos)</label><input type="number" id="auto-interval" name="interval_min" min="5" max="720" value="60"></div>
-              <div style="font-size:11.5px;color:var(--label);margin:-6px 0 16px">La ventana puede cruzar la medianoche (ej. 23:00 → 05:00 para la madrugada).</div>
-              <button type="submit" class="btn btn-accent">Guardar</button>
-            </form>
+            </div>
+            <div class="grid-2" style="gap:14px;margin-top:16px">
+              <div class="field" style="margin-bottom:0"><label>Revisar cada (minutos)</label><input type="number" id="auto-interval" min="5" max="720" value="30"></div>
+              <div class="field" style="margin-bottom:0"><label>Multi-unidad: separar si el pedido supera</label>
+                <div style="display:flex;align-items:center;gap:8px"><input type="number" id="auto-threshold" min="1" max="50" value="1" style="max-width:90px"><span style="font-size:12.5px;color:var(--muted)">unidad(es) → van a «Separación»</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- VISTA BÁSICA: rejilla semanal de solo lectura -->
+          <div id="auto-basic" class="card">
+            <div class="sec-head" style="margin-bottom:14px">
+              <div>
+                <div class="sec-title">Reglas de la semana</div>
+                <div style="font-size:12px;color:var(--muted);margin-top:2px">Qué hace el sistema a cada hora de cada día.</div>
+              </div>
+              <button class="btn btn-ghost" id="auto-preset" style="padding:7px 12px">Cargar recomendadas</button>
+            </div>
+            <div id="auto-grid"></div>
+            <div style="display:flex;gap:16px;margin-top:14px;flex-wrap:wrap;font-size:12px;color:var(--ink3)">
+              <span style="display:flex;align-items:center;gap:6px"><i style="width:12px;height:12px;border-radius:3px;background:#15824a"></i> Ahorro (solo hojas llenas)</span>
+              <span style="display:flex;align-items:center;gap:6px"><i style="width:12px;height:12px;border-radius:3px;background:#b07400"></i> Forzar / vaciado (imprime todo)</span>
+              <span style="display:flex;align-items:center;gap:6px"><i style="width:12px;height:12px;border-radius:3px;background:#c4c9d2"></i> Pausa (acumula)</span>
+            </div>
+          </div>
+
+          <!-- VISTA AVANZADA: editor de tramos por día -->
+          <div id="auto-advanced" class="card" style="display:none">
+            <div class="sec-head" style="margin-bottom:6px">
+              <div>
+                <div class="sec-title">Editor de reglas</div>
+                <div style="font-size:12px;color:var(--muted);margin-top:2px">Define tramos por día (no se pueden solapar). Los huecos quedan en pausa.</div>
+              </div>
+              <div style="display:flex;gap:8px"><button class="btn btn-ghost" id="auto-preset-2" style="padding:7px 12px">Recomendadas</button><button class="btn btn-accent" id="auto-save" style="padding:7px 14px">Guardar reglas</button></div>
+            </div>
+            <div id="auto-editor"></div>
           </div>
 
           <!-- requisitos -->
@@ -426,71 +487,43 @@
         </div>
       </section>
 
-      <!-- ===== CONEXIÓN ===== -->
+      <!-- ===== CUENTAS / TIENDAS ===== -->
       <section class="tab" data-tab="conexion">
         <div class="wrap" style="max-width:980px">
-          <!-- estado cuenta -->
-          <div class="card" style="padding:22px">
-            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px">
-              <div style="display:flex;align-items:center;gap:14px">
-                <div style="width:48px;height:48px;border-radius:12px;background:#fff159;display:flex;align-items:center;justify-content:center;flex:0 0 48px;border:1px solid #ecdf45">
-                  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#2d3277" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13c2-3 5-3 6 0s4 3 6 0 4-3 6 0"></path><path d="M3 17c2-3 5-3 6 0s4 3 6 0 4-3 6 0"></path></svg>
-                </div>
-                <div>
-                  <div style="font-size:16px;font-weight:700">Mercado Libre · <span id="conn-site">—</span></div>
-                  <div style="font-size:12.5px;color:var(--muted);font-family:var(--mono)" id="conn-account">Sin conectar</div>
-                </div>
-              </div>
-              <span class="pill" id="conn-pill-2" style="background:#eef0f3;color:#6a7280;font-size:13px;padding:7px 13px"><span class="pdot" style="width:8px;height:8px;background:#aab0bb"></span><span id="conn-pill-2-label">—</span></span>
+          <div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:16px 20px">
+            <div style="min-width:0">
+              <div style="font-size:15px;font-weight:700">Cuentas / Tiendas</div>
+              <div style="font-size:12.5px;color:var(--muted)">Conecta varias tiendas y marketplaces. La cola combina los pedidos de todas.</div>
             </div>
-
-            <div class="stat-grid" style="margin-top:20px">
-              <div class="stat"><div class="stat-k">Token de acceso</div><div class="stat-v" id="stat-token" style="color:var(--muted)">—</div></div>
-              <div class="stat"><div class="stat-k">Última sincronización</div><div class="stat-v" id="stat-sync">—</div></div>
-              <div class="stat"><div class="stat-k">Ventas en cola</div><div class="stat-v" id="stat-queue">—</div></div>
-              <div class="stat"><div class="stat-k">Refresco de token</div><div class="stat-v" style="color:#15a05a">● Automático</div></div>
-            </div>
-
-            <div class="btn-row" style="margin-top:20px;flex-wrap:wrap">
-              <button class="btn btn-accent" id="btn-sync">Sincronizar ahora</button>
-              <button class="btn btn-ghost" id="btn-connect">Conectar con Mercado Libre</button>
-              <button class="btn btn-ghost" id="btn-renew">Renovar token</button>
-              <button class="btn btn-danger" id="btn-disconnect">Desconectar</button>
-            </div>
+            <button class="btn btn-accent" id="acc-add-open">+ Agregar tienda</button>
           </div>
 
-          <!-- credenciales -->
-          <div class="card">
-            <div class="sec-title" style="margin-bottom:4px">Credenciales de la aplicación</div>
-            <div style="font-size:12.5px;color:var(--muted);margin-bottom:16px">Datos de tu app en <span class="muted-mono">developers.mercadolibre.com.mx</span>. El secreto se guarda <strong>cifrado</strong> en este equipo.</div>
-            <form id="config-form">
-              <div class="field"><label>App ID (Client ID)</label><input name="app_id" id="app_id" type="text" required></div>
-              <div class="field"><label>Client Secret</label><input name="client_secret" id="client_secret" type="password" autocomplete="off" placeholder="•••• (déjalo vacío para conservar)"></div>
-              <div class="field"><label>Redirect URI</label><input name="redirect_uri" id="redirect_uri" type="text" required value="https://hobbies-ooo-without-lease.trycloudflare.com/callback" style="font-family:var(--mono)">
-                <div style="font-size:11px;color:var(--label);margin-top:5px">Debe coincidir exactamente con el registrado en tu app de Mercado Libre.</div></div>
-              <button type="submit" class="btn btn-ghost" style="border-color:#cfd3da">Guardar credenciales</button>
+          <div id="accounts-list" style="display:flex;flex-direction:column;gap:14px"></div>
+
+          <!-- alta / edición de tienda (oculto) -->
+          <div id="acc-form-card" class="card" style="display:none">
+            <div class="sec-title" style="margin-bottom:4px" id="acc-form-title">Agregar tienda</div>
+            <div style="font-size:12.5px;color:var(--muted);margin-bottom:16px">Datos de tu app del marketplace. El secreto se guarda <strong>cifrado</strong> en este equipo.</div>
+            <form id="acc-form">
+              <input type="hidden" name="account_id" id="acc-id">
+              <div class="field"><label>Marketplace</label><select name="provider" id="acc-provider" style="width:100%;border:1px solid #d8dbe1;border-radius:9px;padding:9px 11px;font:inherit;font-size:13px;outline:none"></select></div>
+              <div class="field"><label>Nombre de la tienda</label><input name="name" id="acc-name" type="text" placeholder="ej. Superofertas"></div>
+              <div class="field"><label>App ID (Client ID)</label><input name="app_id" id="acc-app-id" type="text" required></div>
+              <div class="field"><label>Client Secret</label><input name="client_secret" id="acc-secret" type="password" autocomplete="off" placeholder="•••• (vacío = conservar)"></div>
+              <div class="field"><label>Redirect URI</label><input name="redirect_uri" id="acc-redirect" type="text" required style="font-family:var(--mono)">
+                <div style="font-size:11px;color:var(--label);margin-top:5px">Debe coincidir con el registrado en tu app del marketplace.</div></div>
+              <div class="btn-row"><button type="submit" class="btn btn-accent">Guardar</button><button type="button" class="btn btn-ghost" id="acc-cancel">Cancelar</button></div>
             </form>
           </div>
 
           <!-- fallback code -->
-          <div class="card">
+          <div class="card" id="acc-manual-card" style="display:none">
             <div class="sec-title" style="margin-bottom:4px">¿El callback automático no funcionó?</div>
-            <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px">Pega el parámetro <span class="muted-mono">code</span> que aparece en la URL tras autorizar.</div>
-            <form id="manual-form" style="display:flex;gap:9px">
-              <input name="code" id="manual_code" type="text" placeholder="Código de autorización" style="flex:1;border:1px solid #d8dbe1;border-radius:9px;padding:9px 11px;font:inherit;font-size:13px;font-family:var(--mono);outline:none">
-              <button type="submit" class="btn btn-ghost" style="white-space:nowrap;border-color:#cfd3da">Canjear código</button>
+            <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px">Pega el <span class="muted-mono">code</span> de la URL tras autorizar (para <strong id="acc-manual-name"></strong>).</div>
+            <form id="acc-manual-form" style="display:flex;gap:9px">
+              <input id="acc-manual-code" type="text" placeholder="Código de autorización" style="flex:1;border:1px solid #d8dbe1;border-radius:9px;padding:9px 11px;font:inherit;font-size:13px;font-family:var(--mono);outline:none">
+              <button type="submit" class="btn btn-ghost" style="white-space:nowrap;border-color:#cfd3da">Canjear</button>
             </form>
-          </div>
-
-          <!-- scopes -->
-          <div class="card">
-            <div class="sec-title" style="margin-bottom:14px">Alcance de permisos (scopes)</div>
-            <div style="display:flex;flex-wrap:wrap;gap:9px">
-              <span class="scope">read ✓</span>
-              <span class="scope">offline_access ✓</span>
-              <span class="scope">write ✓</span>
-              <span class="scope">orders / shipments ✓</span>
-            </div>
           </div>
         </div>
       </section>
