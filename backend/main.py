@@ -6,17 +6,21 @@ consultas a Mercado Libre. Escucha solo en 127.0.0.1 sobre HTTPS (ver run.sh).
 from __future__ import annotations
 
 import json
+import time
 import uuid
 
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 import label_layout
+import label_stub
 import orders_hub
+import pdf_import
 import print_jobs
 import printers
 import scheduler
 import storage
+import tiktok_import
 from config import FRONTEND_DIR, SITE_ID, STAMP_PATH
 from providers.base import ProviderError
 from providers.registry import CATALOG, get_provider
@@ -102,11 +106,13 @@ def accounts() -> JSONResponse:
 @app.post("/api/accounts")
 def save_account(provider: str = Form("ml"), name: str = Form(""),
                  app_id: str = Form(...), client_secret: str = Form(""),
-                 redirect_uri: str = Form(...),
+                 redirect_uri: str = Form(""),
                  account_id: str = Form("")) -> JSONResponse:
     aid = account_id.strip() or uuid.uuid4().hex[:12]
     fields = {"provider": provider, "name": name.strip() or "Tienda",
-              "site": SITE_ID, "app_id": app_id.strip(), "redirect_uri": redirect_uri.strip()}
+              "app_id": app_id.strip(), "redirect_uri": redirect_uri.strip()}
+    if provider == "ml":
+        fields["site"] = SITE_ID   # en TikTok `site` guarda el shop_cipher: no pisarlo
     if client_secret.strip():   # vacío = conservar el existente
         fields["client_secret"] = client_secret.strip()
     storage.upsert_account(aid, **fields)
@@ -130,10 +136,18 @@ def enable_account(account_id: str, enabled: str = Form("1")) -> JSONResponse:
 @app.get("/api/accounts/{account_id}/connect")
 def account_connect(account_id: str) -> JSONResponse:
     acc = _account_or_404(account_id)
+    provider = get_provider(acc["provider"])
+    # Proveedores sin redirect (Walmart): conectar = validar credenciales aquí.
+    if provider.auth_mode == "client_credentials":
+        try:
+            provider.connect(acc)
+        except ProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return JSONResponse({"connected": True})
     state = uuid.uuid4().hex
     storage.set_value("oauthstate_" + state, account_id)
     try:
-        url = get_provider(acc["provider"]).authorize_url(acc, state)
+        url = provider.authorize_url(acc, state)
     except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return JSONResponse({"authorization_url": url})
@@ -504,23 +518,173 @@ def _label_size() -> tuple[float, float, bool]:
     return DEFAULT_LABEL_W_PT, DEFAULT_LABEL_H_PT, False
 
 
+_PROVIDER_BRANDS = {"ml": "MERCADO ENVIOS", "walmart": "WALMART", "tiktok": "TIKTOK SHOP"}
+
+
+def _provider_label_size(provider: str) -> tuple[float, float, bool]:
+    """Tamaño de etiqueta por proveedor (TikTok: guía recortada del PDF)."""
+    if provider == "tiktok":
+        return tiktok_import.GUIDE_W_PT, tiktok_import.GUIDE_H_PT, True
+    return _label_size()
+
+
 @app.get("/api/layout-plan")
-def layout_plan(count: int = 1) -> JSONResponse:
+def layout_plan(count: int = 1, provider: str = "") -> JSONResponse:
     """Cómo se acomodarán N etiquetas (para el texto en vivo)."""
-    w, h, real = _label_size()
+    w, h, real = _provider_label_size(provider)
+    stub = bool(provider) and label_stub.enabled_for(provider)
+    if stub:
+        h += label_stub.STUB_H_PT
     p = label_layout.plan(max(0, count), w, h)
     p["size_source"] = "real" if real else "estimado"
     p["label_cm"] = f"{w / 28.3465:.1f}×{h / 28.3465:.1f} cm"
+    p["stub"] = stub
     return JSONResponse(p)
 
 
 @app.get("/api/layout-preview")
-def layout_preview(count: int = 4) -> Response:
-    """PDF de muestra con el acomodo real (sin tocar ML ni gastar papel)."""
-    w, h, _real = _label_size()
-    pdf = label_layout.build_preview(max(1, count), w, h)
+def layout_preview(count: int = 4, provider: str = "") -> Response:
+    """PDF de muestra con el acomodo real (sin tocar el marketplace ni gastar papel).
+
+    Con `provider`, la muestra usa el tamaño de ese marketplace y, si el talón
+    de control está activo para él, las etiquetas de muestra lo incluyen.
+    """
+    w, h, _real = _provider_label_size(provider)
+    count = max(1, count)
+    brand = _PROVIDER_BRANDS.get(provider, "MERCADO ENVIOS")
+    sample = label_layout.sample_labels(count, w, h, brand=brand)
+    if provider and label_stub.enabled_for(provider):
+        sample = label_stub.add_stub(sample, label_stub.SAMPLE_PRODUCTS,
+                                     order_ref="PEDIDO-DEMO")
+    pdf = label_layout.build_preview(count, w, h, pages=sample)
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": 'inline; filename="acomodo.pdf"'})
+
+
+# --- Talón de control de producto (Walmart / TikTok) --------------------------
+@app.get("/api/stub-config")
+def stub_config() -> JSONResponse:
+    cfg = label_stub.get_config()
+    return JSONResponse({**cfg, "stub_h_pt": label_stub.STUB_H_PT})
+
+
+@app.post("/api/stub-config")
+def set_stub_config(provider: str = Form(""), account_id: str = Form(""),
+                    enabled: str = Form("")) -> JSONResponse:
+    """Ajusta el talón por marketplace (provider) o por tienda (account_id).
+
+    Para account_id, enabled vacío borra la excepción (hereda del marketplace).
+    """
+    try:
+        if account_id.strip():
+            on = None if enabled == "" else enabled in ("1", "true", "on", "True")
+            cfg = label_stub.set_account_enabled(account_id.strip(), on)
+        elif provider.strip():
+            cfg = label_stub.set_enabled(provider.strip(),
+                                         enabled in ("1", "true", "on", "True"))
+        else:
+            raise HTTPException(status_code=400, detail="Falta provider o account_id.")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"ok": True, **cfg})
+
+
+@app.get("/api/stub-preview")
+def stub_preview(provider: str = "walmart") -> Response:
+    """Una etiqueta de muestra tal como saldrá impresa con la config actual
+    (con talón si está activo para ese marketplace; sin él si no)."""
+    w, h, _real = _provider_label_size(provider)
+    pdf = label_layout.sample_labels(1, w, h,
+                                     brand=_PROVIDER_BRANDS.get(provider, "MUESTRA"))
+    if label_stub.enabled_for(provider):
+        pdf = label_stub.add_stub(pdf, label_stub.SAMPLE_PRODUCTS,
+                                  order_ref="PEDIDO-DEMO")
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="etiqueta.pdf"'})
+
+
+# --- Importar PDF de etiquetas (TikTok Shop, Walmart) --------------------------
+# Resultados en memoria para ver/imprimir tras importar (se conservan los últimos 5).
+_PDF_IMPORTS: dict[str, dict] = {}
+
+
+@app.post("/api/labels/import")
+async def labels_pdf_import(file: UploadFile = File(...),
+                            provider: str = Form("tiktok")) -> JSONResponse:
+    if provider not in pdf_import.PROVIDERS:
+        raise HTTPException(status_code=400,
+                            detail=f"Marketplace no soportado: {provider}")
+    raw = await file.read()
+    with_stub = label_stub.enabled_for(provider)
+    try:
+        pdf, meta = pdf_import.import_pdf(provider, raw, with_stub=with_stub)
+    except pdf_import.PdfImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    packed, layout = label_layout.pack_labels_to_sheets(pdf)
+    token = uuid.uuid4().hex[:12]
+    while len(_PDF_IMPORTS) >= 5:
+        _PDF_IMPORTS.pop(next(iter(_PDF_IMPORTS)))
+    _PDF_IMPORTS[token] = {"pdf": packed, "meta": meta, "ts": int(time.time()),
+                           "name": file.filename, "provider": provider}
+    return JSONResponse({
+        "ok": True, "token": token, "guides": len(meta), "layout": layout,
+        "stub": with_stub, "provider": provider,
+        "without_product": sum(1 for m in meta if not m["products"]),
+        "items": [{"order_id": m["order_id"], "tracking": m["tracking"],
+                   "products": m["products"]} for m in meta],
+    })
+
+
+def _pdf_import_or_404(token: str) -> dict:
+    imp = _PDF_IMPORTS.get(token)
+    if not imp:
+        raise HTTPException(status_code=404,
+                            detail="Importación no encontrada (vuelve a subir el PDF).")
+    return imp
+
+
+@app.get("/api/labels/import/{token}/pdf")
+def labels_import_pdf_view(token: str) -> Response:
+    imp = _pdf_import_or_404(token)
+    return Response(content=imp["pdf"], media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="guias_importadas.pdf"'})
+
+
+@app.post("/api/labels/import/{token}/print")
+def labels_import_print(token: str, printer: str = Form("")) -> JSONResponse:
+    imp = _pdf_import_or_404(token)
+    target = _resolve_target(printer)
+    ok, reason = printers.preflight(target)
+    if not ok:
+        raise HTTPException(status_code=409, detail=f"Impresora no lista: {reason}")
+    batch = uuid.uuid4().hex[:10]
+    try:
+        job = printers.print_bytes(target, imp["pdf"], raw=False,
+                                   title=f"import_{imp['provider']}_{token}")
+    except printers.PrinterError as exc:
+        _history_pdf_import(imp, batch, target, "error", str(exc))
+        raise HTTPException(status_code=502, detail=str(exc))
+    result, why = printers.wait_for_job(target, job)
+    status = "ok" if result == "completed" else "risk"
+    _history_pdf_import(imp, batch, target, status, why)
+    if status == "ok":
+        return JSONResponse({"ok": True, "printer": target, "job": job,
+                             "guides": len(imp["meta"])})
+    raise HTTPException(status_code=502, detail=(
+        f"Se envió pero no se confirmó la impresión: {why} Revisa el Historial."))
+
+
+def _history_pdf_import(imp: dict, batch: str, printer_name: str,
+                        status: str, error: str | None) -> None:
+    """Una fila de historial por guía importada (rastreable por tracking)."""
+    account = f"{pdf_import.PROVIDERS.get(imp['provider'], imp['provider'])} (PDF)"
+    for m in imp["meta"]:
+        summary = "; ".join(f"{p['quantity']}× {p['title']}" for p in m["products"])[:200]
+        storage.add_print_history(
+            batch, m.get("tracking") or m.get("order_id") or imp["provider"],
+            "pdf", status=status, order_id=m.get("order_id"),
+            product_summary=summary or None, printer=printer_name,
+            error=error, account=account)
 
 
 # --- Historial de impresión --------------------------------------------------

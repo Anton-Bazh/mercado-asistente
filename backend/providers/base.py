@@ -19,9 +19,16 @@ class ProviderError(Exception):
 class Provider:
     name = "base"
     label = "Proveedor"
+    # 'oauth' = flujo con redirect y code (authorize_url/exchange_code).
+    # 'client_credentials' = solo Client ID + Secret; conectar = validar con connect().
+    auth_mode = "oauth"
 
     # --- OAuth / conexión ---
     def authorize_url(self, account: dict, state: str) -> str:
+        raise NotImplementedError
+
+    def connect(self, account: dict) -> None:
+        """Valida credenciales y marca la cuenta conectada (auth_mode client_credentials)."""
         raise NotImplementedError
 
     def exchange_code(self, account: dict, code: str) -> None:

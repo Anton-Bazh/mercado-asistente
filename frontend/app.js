@@ -36,7 +36,8 @@ const TITLES = {
   separacion: ['Separación', 'Pedidos multi-unidad para gestión manual (separar o imprimir)'],
   automatico: ['Impresión automática', 'El servidor imprime solo, según las reglas de la semana'],
   dispositivos: ['Dispositivos', 'Destino de impresión disponible'],
-  conexion: ['Conexión Mercado Libre', 'Gestión de la integración con la API'],
+  etiquetas: ['Etiquetas', 'Talón de control, vista previa del acomodo e importación de PDFs'],
+  conexion: ['Cuentas / Tiendas', 'Conecta tus tiendas de cada marketplace'],
   historial: ['Historial de impresión', 'Registro persistente de todas las etiquetas impresas'],
   logs: ['Logs del sistema', 'Registro de actividad de esta sesión'],
 };
@@ -94,19 +95,24 @@ function buildMeta(orders) {
   return JSON.stringify(m);
 }
 
-// ===== Sello del sistema =====
+// ===== Acerca de (sello del sistema) =====
 async function loadStamp() {
   try { const d = await api('/api/stamp'); state.stamp = d.stamp || ''; } catch {}
 }
+const STAMP_LOGO_SVG = '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="6" rx="1"></rect><path d="M6 14H4a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="7" rx="1"></rect></svg>';
 function showStamp({ title, msg, critical }) {
   const pre = $('stamp-art'); if (pre) { pre.textContent = state.stamp || '(sello no disponible)'; pre.style.color = critical ? '#c43232' : 'var(--accent)'; }
   const head = $('stamp-head'), icon = $('stamp-icon');
   head.style.background = critical ? '#fbe9e9' : 'var(--accent-tint)';
   icon.style.background = critical ? '#d33a3a' : 'var(--accent)';
-  icon.textContent = critical ? '✕' : '✦';
-  $('stamp-title').textContent = title || 'Sello del sistema';
+  icon.innerHTML = critical ? '✕' : STAMP_LOGO_SVG;
+  $('stamp-title').textContent = title || 'Acerca de EtiquetaFlow';
   $('stamp-msg').textContent = msg || '';
   $('stamp-msg').style.display = msg ? 'block' : 'none';
+  // créditos del creador solo en el «Acerca de»; en fallo crítico estorban
+  $('stamp-credits').style.display = critical ? 'none' : 'block';
+  $('stamp-foot').textContent = critical ? 'EtiquetaFlow · sello de sistema'
+    : '© 2026 Antonio Baeza · EtiquetaFlow para INMATMEX';
   $('stamp-overlay').style.display = 'flex';
 }
 function hideStamp() { $('stamp-overlay').style.display = 'none'; }
@@ -718,12 +724,70 @@ function renderConexion() {
         ${a.connected?`<button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="refresh">Renovar token</button>`:''}
         <button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="edit">Editar</button>
         <button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="toggle">${a.enabled?'Pausar':'Activar'}</button>
-        <button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="manual">Canjear code</button>
+        ${a.provider!=='walmart'?`<button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="manual">Canjear code</button>`:''}
         ${a.connected?`<button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" data-acc="${esc(a.id)}" data-act="disconnect">Desconectar</button>`:''}
         <button class="btn btn-danger" style="padding:7px 11px;font-size:12px" data-acc="${esc(a.id)}" data-act="delete">✕</button>
       </div>
     </div>`;
   }).join('');
+}
+
+// ===== Etiquetas: talón de control + vista previa por marketplace/tienda =====
+async function loadStubCard() {
+  try { const d = await api('/api/stub-config'); state.stubCfg = { providers: d.providers || {}, accounts: d.accounts || {} }; }
+  catch { state.stubCfg = null; }
+  await loadAccounts();           // para listar las tiendas de cada marketplace
+  renderStubRows();
+  updateStubPreviews();
+}
+function renderStubRows() {
+  const box = $('stub-rows'); if (!box) return;
+  if (!state.stubCfg) { box.innerHTML = '<div style="font-size:12px;color:var(--muted)">No disponible.</div>'; return; }
+  const provs = [
+    { id: 'ml', label: 'Mercado Libre', native: true },
+    { id: 'walmart', label: 'Walmart', native: false },
+    { id: 'tiktok', label: 'TikTok Shop', native: false },
+  ];
+  box.innerHTML = provs.map(p => {
+    const on = !!state.stubCfg.providers[p.id];
+    const toggle = p.native
+      ? '<span class="chip" style="background:var(--accent-tint);color:var(--accent)">producto impreso nativo</span>'
+      : `<label style="display:flex;align-items:center;gap:7px;font-size:12.5px;cursor:pointer"><input type="checkbox" data-stub-prov="${p.id}" ${on ? 'checked' : ''}> Talón activo</label>`;
+    // tiendas conectadas/configuradas de este marketplace (excepción por tienda)
+    const accs = p.native ? [] : state.accounts.filter(a => a.provider === p.id);
+    const accRows = accs.map(a => {
+      const ov = state.stubCfg.accounts[a.id];               // excepción (si hay)
+      const val = ov === undefined ? '' : (ov ? '1' : '0');
+      return `<div style="display:flex;align-items:center;justify-content:space-between;gap:9px;padding:7px 0 0 22px">
+        <div style="font-size:12px;color:var(--muted)">↳ ${esc(a.name || 'Tienda')}</div>
+        <select data-stub-acc="${esc(a.id)}" style="border:1px solid #d8dbe1;border-radius:8px;padding:4px 8px;font:inherit;font-size:12px;outline:none">
+          <option value="" ${val === '' ? 'selected' : ''}>Heredar (${on ? 'talón activo' : 'sin talón'})</option>
+          <option value="1" ${val === '1' ? 'selected' : ''}>Talón activo</option>
+          <option value="0" ${val === '0' ? 'selected' : ''}>Sin talón</option>
+        </select>
+      </div>`;
+    }).join('');
+    return `<div style="border:1px solid #e5e7ec;border-radius:10px;padding:10px 13px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+        <div style="font-size:13px;font-weight:700">${esc(p.label)}</div>
+        ${toggle}
+      </div>
+      ${accRows}
+      ${!p.native && !accs.length ? '<div style="font-size:11.5px;color:var(--muted2);padding:6px 0 0 22px">↳ sin tiendas dadas de alta todavía (el ajuste del marketplace aplicará a las que conectes)</div>' : ''}
+    </div>`;
+  }).join('');
+}
+async function updateStubPreviews() {
+  const prov = $('stub-prev-provider') ? $('stub-prev-provider').value : 'walmart';
+  const n = parseInt($('stub-count').value, 10) || 8;
+  const bust = Date.now();
+  $('stub-frame-label').src = `/api/stub-preview?provider=${prov}&_=${bust}`;
+  $('stub-frame-sheet').src = `/api/layout-preview?count=${n}&provider=${prov}&_=${bust}`;
+  try {
+    const pl = await api(`/api/layout-plan?count=${n}&provider=${prov}`);
+    $('stub-plan-text').textContent =
+      `→ ${pl.labels_per_sheet}/hoja → ${pl.sheets} hoja${pl.sheets === 1 ? '' : 's'} · ${pl.label_cm}${pl.stub ? ' + talón' : ''} (${pl.size_source})`;
+  } catch { $('stub-plan-text').textContent = ''; }
 }
 
 // ===== Modo automático (reglas por horario) =====
@@ -951,6 +1015,7 @@ function go(tab) {
   else if (tab === 'automatico') { loadAuto().then(renderAuto); }
   else if (tab === 'dispositivos') loadPrinters({ force: true });
   else if (tab === 'conexion') { loadAccounts().then(renderConexion); }
+  else if (tab === 'etiquetas') { loadStubCard(); }
   else if (tab === 'historial') renderHistorial();
   else if (tab === 'logs') renderLogs();
 }
@@ -1146,6 +1211,25 @@ function init() {
 
   // cuentas / tiendas
   const DEFAULT_REDIRECT = location.origin + '/callback';
+  // El campo Redirect URI solo aplica a proveedores que lo registran aquí (ML);
+  // Walmart va por client_credentials y TikTok lo registra en su Partner Center.
+  const ACC_FORM_HINTS = {
+    walmart: ['Client ID', 'Client Secret',
+      'Walmart no usa Redirect URI: genera el Client ID y Client Secret en developer.walmart.com (mercado MX) y pulsa «Conectar» tras guardar.'],
+    tiktok: ['App Key', 'App Secret',
+      'TikTok Shop: crea la app en partner.tiktokshop.com y pega su App Key y App Secret. El Redirect se registra allá; si al autorizar no regresas aquí, copia el parámetro «code» de la URL de retorno y usa «Canjear code».'],
+  };
+  function syncAccFormFields() {
+    const p = state.providers.find(x => x.id === $('acc-provider').value) || {};
+    const needsRedirect = p.needs_redirect !== false;
+    const hint = ACC_FORM_HINTS[p.id];
+    $('acc-redirect-field').style.display = needsRedirect ? '' : 'none';
+    $('acc-cc-hint').style.display = hint ? '' : 'none';
+    $('acc-cc-hint').textContent = hint ? hint[2] : '';
+    $('acc-app-id-label').textContent = hint ? hint[0] : 'App ID (Client ID)';
+    $('acc-secret-label').textContent = hint ? hint[1] : 'Client Secret';
+    $('acc-redirect').required = needsRedirect;
+  }
   function openAccForm(acc) {
     // llena el selector de proveedor (solo disponibles)
     const sel = $('acc-provider');
@@ -1160,9 +1244,11 @@ function init() {
     $('acc-secret').value = '';
     $('acc-secret').placeholder = acc && acc.has_secret ? '•••• (vacío = conservar)' : '';
     $('acc-redirect').value = acc ? (acc.redirect_uri || DEFAULT_REDIRECT) : DEFAULT_REDIRECT;
+    syncAccFormFields();
     $('acc-form-card').style.display = 'block';
     $('acc-form-card').scrollIntoView({ behavior:'smooth', block:'center' });
   }
+  $('acc-provider').addEventListener('change', syncAccFormFields);
   $('acc-add-open').addEventListener('click', () => openAccForm(null));
   $('acc-cancel').addEventListener('click', () => { $('acc-form-card').style.display = 'none'; });
   $('acc-form').addEventListener('submit', async e => {
@@ -1192,8 +1278,15 @@ function init() {
     const acc = state.accounts.find(a => a.id === id);
     try {
       if (act === 'connect') {
-        const { authorization_url } = await api(`/api/accounts/${encodeURIComponent(id)}/connect`);
-        window.location.href = authorization_url;
+        const res = await api(`/api/accounts/${encodeURIComponent(id)}/connect`);
+        if (res.connected) {
+          // Proveedor sin redirect (Walmart): las credenciales ya quedaron validadas.
+          await loadAccounts(); await refreshStatus(); renderConexion();
+          showBanner('Credenciales validadas. Tienda conectada.', 'success');
+          log('OK','cuentas',`Tienda «${(acc&&acc.name)||id}» conectada (client_credentials).`);
+        } else {
+          window.location.href = res.authorization_url;
+        }
       } else if (act === 'refresh') {
         await api(`/api/accounts/${encodeURIComponent(id)}/refresh`, { method:'POST' });
         await loadAccounts(); renderConexion(); showBanner('Token renovado.', 'success');
@@ -1217,12 +1310,100 @@ function init() {
     } catch (err) { showBanner('Error: ' + err.message, 'error'); }
   });
 
+  // etiquetas: talón por marketplace y por tienda + vista previa en vivo
+  $('stub-rows').addEventListener('change', async e => {
+    const fd = new FormData();
+    const prov = e.target.closest('[data-stub-prov]');
+    const acc = e.target.closest('[data-stub-acc]');
+    if (!prov && !acc) return;
+    try {
+      let msg;
+      if (prov) {
+        fd.append('provider', prov.dataset.stubProv);
+        fd.append('enabled', prov.checked ? '1' : '0');
+        msg = `Talón ${prov.checked ? 'activado' : 'desactivado'} para ${PROVIDER_LABEL[prov.dataset.stubProv] || prov.dataset.stubProv}.`;
+      } else {
+        fd.append('account_id', acc.dataset.stubAcc);
+        fd.append('enabled', acc.value);   // '' = heredar del marketplace
+        msg = acc.value === '' ? 'La tienda hereda el ajuste del marketplace.'
+          : `Talón ${acc.value === '1' ? 'activado' : 'desactivado'} para la tienda.`;
+      }
+      const d = await api('/api/stub-config', { method: 'POST', body: fd });
+      state.stubCfg = { providers: d.providers || {}, accounts: d.accounts || {} };
+      showBanner(msg, 'success');
+      log('OK', 'etiquetas', msg);
+      renderStubRows();
+      updateStubPreviews();
+    } catch (err) { showBanner('No se pudo guardar: ' + err.message, 'error'); loadStubCard(); }
+  });
+  $('stub-count').addEventListener('change', updateStubPreviews);
+  $('stub-prev-provider').addEventListener('change', updateStubPreviews);
+
+  // importar PDF de etiquetas (TikTok Shop / Walmart)
+  const PDF_IMPORT_HINTS = {
+    tiktok: 'Formato esperado: hoja Carta con 2 envíos (guía + packing list). Se recorta cada guía y se lee producto, SKU y piezas del packing list.',
+    walmart: 'Se toma cada página como una guía completa y se buscan producto/SKU/cantidad en el texto. Si tu PDF trae otro formato, compárteme un ejemplo para calibrar el recorte como en TikTok.',
+  };
+  function syncPdfImportHint() {
+    $('pdf-import-hint').textContent = PDF_IMPORT_HINTS[$('pdf-import-provider').value] || '';
+  }
+  syncPdfImportHint();
+  $('pdf-import-provider').addEventListener('change', syncPdfImportHint);
+  $('pdf-import-btn').addEventListener('click', async () => {
+    const f = $('pdf-import-file').files[0];
+    const prov = $('pdf-import-provider').value;
+    if (!f) { showBanner('Elige el PDF del seller center.', 'info'); return; }
+    const box = $('pdf-import-result');
+    box.style.display = 'block';
+    box.innerHTML = '<span style="font-size:12.5px;color:var(--muted)">Procesando…</span>';
+    try {
+      const fd = new FormData(); fd.append('file', f); fd.append('provider', prov);
+      const d = await api('/api/labels/import', { method: 'POST', body: fd });
+      state.pdfImport = d;
+      const lay = d.layout || {};
+      const items = (d.items || []).slice(0, 6).map(m => {
+        const p = (m.products || [])[0] || {};
+        return `<div style="font-size:11.5px;color:var(--muted);font-family:var(--mono)">#${esc(m.order_id || '—')} · ${p.quantity || 1}× ${esc((p.title || 'sin producto detectado').slice(0, 48))}</div>`;
+      }).join('');
+      const warn = d.without_product
+        ? `<div style="font-size:11.5px;color:#b07400;margin-top:4px">⚠ ${d.without_product} guía(s) sin producto detectado (salen sin talón).</div>` : '';
+      box.innerHTML = `
+        <div style="font-size:13px;font-weight:700;margin-bottom:6px">${d.guides} guías detectadas → ${lay.sheets || '?'} hoja(s) Carta (${lay.labels_per_sheet || '?'} por hoja)${d.stub ? ' · talón inyectado' : ''}</div>
+        ${items}${(d.items || []).length > 6 ? `<div style="font-size:11.5px;color:var(--muted)">… y ${d.items.length - 6} más</div>` : ''}
+        ${warn}
+        <div class="btn-row" style="margin-top:11px">
+          <button class="btn btn-ghost" data-imp-act="view">Ver PDF listo</button>
+          <button class="btn btn-accent" data-imp-act="print">Imprimir</button>
+        </div>`;
+      log('OK', 'etiquetas', `${PROVIDER_LABEL[prov] || prov}: ${d.guides} guías importadas de «${f.name}».`);
+    } catch (err) {
+      box.innerHTML = `<span style="font-size:12.5px;color:#c0392b">${esc(err.message)}</span>`;
+    }
+  });
+  $('pdf-import-result').addEventListener('click', async e => {
+    const b = e.target.closest('[data-imp-act]'); if (!b || !state.pdfImport) return;
+    const tok = state.pdfImport.token;
+    if (b.dataset.impAct === 'view') { window.open(`/api/labels/import/${tok}/pdf`, '_blank'); return; }
+    if (b.dataset.impAct === 'print') {
+      const sheets = (state.pdfImport.layout || {}).sheets || '?';
+      if (!confirm(`¿Imprimir ${state.pdfImport.guides} guías (${sheets} hojas)?`)) return;
+      b.disabled = true;
+      try {
+        const fd = new FormData(); fd.append('printer', '');
+        const r = await api(`/api/labels/import/${tok}/print`, { method: 'POST', body: fd });
+        showBanner(`Enviado a impresora: ${r.printer}`, 'success');
+        log('OK', 'impresion', `Importación: ${r.guides} guías impresas en «${r.printer}».`);
+      } catch (err) { showBanner('Error al imprimir: ' + err.message, 'error'); }
+      b.disabled = false;
+    }
+  });
+
   // sello del sistema
   $('stamp-close').addEventListener('click', hideStamp);
   $('stamp-overlay').addEventListener('click', e => { if (e.target === $('stamp-overlay')) hideStamp(); });
   $('diag-close').addEventListener('click', hideDiag);
   $('diag-overlay').addEventListener('click', e => { if (e.target === $('diag-overlay')) hideDiag(); });
-  $('side-foot').addEventListener('click', () => showStamp({ title: 'Sello del sistema', msg: 'EtiquetaFlow · ' + location.host, critical: false }));
+  $('side-foot').addEventListener('click', () => showStamp({ msg: 'EtiquetaFlow · ' + location.host, critical: false }));
 
   // arranque
   renderFormatSeg();

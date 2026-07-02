@@ -77,12 +77,9 @@ def plan(count: int, label_w: float, label_h: float) -> dict:
     }
 
 
-def build_preview(count: int, label_w: float, label_h: float) -> bytes:
-    """PDF de muestra: `count` etiquetas de marcador de posición, ya acomodadas.
-
-    Sirve para ver el acomodo real (rejilla, orientación, márgenes, nº de hojas)
-    sin descargar nada de Mercado Libre ni gastar papel.
-    """
+def sample_labels(count: int, label_w: float, label_h: float,
+                  brand: str = "MERCADO ENVIOS") -> bytes:
+    """PDF con `count` etiquetas de marcador de posición (una por página)."""
     count = max(1, min(count, 200))
     src = fitz.open()
     try:
@@ -93,7 +90,7 @@ def build_preview(count: int, label_w: float, label_h: float) -> bytes:
             # cabecera tipo etiqueta
             pg.draw_rect(fitz.Rect(r.x0 + 2, r.y0 + 2, r.x1 - 2, r.y0 + 22),
                          color=None, fill=(0.11, 0.12, 0.14))
-            pg.insert_text((r.x0 + 8, r.y0 + 16), "MERCADO ENVIOS",
+            pg.insert_text((r.x0 + 8, r.y0 + 16), brand,
                            fontsize=8, color=(1, 1, 1))
             pg.insert_text((r.x0 + 10, r.y0 + 44), f"Etiqueta {i + 1}",
                            fontsize=13, color=(0, 0, 0))
@@ -111,9 +108,20 @@ def build_preview(count: int, label_w: float, label_h: float) -> bytes:
                 x += w + 1
             pg.insert_text((r.x0 + 10, r.y1 - 6), f"#PREVIEW-{i + 1:03d}",
                            fontsize=8, color=(0.2, 0.2, 0.2))
-        sample = src.tobytes()
+        return src.tobytes()
     finally:
         src.close()
+
+
+def build_preview(count: int, label_w: float, label_h: float,
+                  brand: str = "MERCADO ENVIOS", pages: bytes | None = None) -> bytes:
+    """PDF de muestra: `count` etiquetas de marcador de posición, ya acomodadas.
+
+    Sirve para ver el acomodo real (rejilla, orientación, márgenes, nº de hojas)
+    sin descargar nada del marketplace ni gastar papel. `pages` permite pasar
+    etiquetas de muestra ya generadas (p. ej. con talón de control inyectado).
+    """
+    sample = pages if pages is not None else sample_labels(count, label_w, label_h, brand)
     packed, _meta = pack_labels_to_sheets(sample)
     return packed
 

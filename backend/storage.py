@@ -38,6 +38,7 @@ AUTO_ENABLED = "auto_enabled"        # '1'/'0'
 AUTO_INTERVAL = "auto_interval_min"  # minutos entre revisiones
 AUTO_RULES = "auto_rules"            # JSON: reglas semanales por día/tramo/modo
 MULTIUNIT_THRESHOLD = "multiunit_threshold"  # >N unidades → lista de separación (def. 1)
+STUB_PROVIDERS = "stub_providers"    # JSON {'walmart': bool, 'tiktok': bool} — talón de control
 
 # Conjunto de claves cuyo valor se cifra en reposo
 _ENCRYPTED_KEYS = {CLIENT_SECRET, ACCESS_TOKEN, REFRESH_TOKEN, PKCE_VERIFIER}

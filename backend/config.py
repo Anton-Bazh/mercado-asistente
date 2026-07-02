@@ -41,6 +41,29 @@ ORDERS_SEARCH_URL = f"{API_BASE}/orders/search"
 SHIPMENTS_URL = f"{API_BASE}/shipments"
 LABELS_URL = f"{API_BASE}/shipment_labels"
 
+# --- Walmart Marketplace (México) --------------------------------------------
+# Auth por client_credentials (sin redirect OAuth): token de 15 min que se
+# renueva solo. Todas las llamadas llevan WM_MARKET=mx.
+WALMART_API_BASE = "https://marketplace.walmartapis.com"
+WALMART_TOKEN_URL = f"{WALMART_API_BASE}/v3/token"
+WALMART_ORDERS_URL = f"{WALMART_API_BASE}/v3/orders"
+WALMART_LABELS_URL = f"{WALMART_API_BASE}/v3/orders/labels"   # bulk (PDF/ZIP) por trackingNumbers
+WALMART_LABEL_URL = f"{WALMART_API_BASE}/v3/orders/label"     # individual (PNG) por trackingNumber
+WALMART_MARKET = "mx"
+WALMART_SVC_NAME = "EtiquetaFlow"
+WALMART_ORDERS_LOOKBACK_DAYS = 30   # ventana de búsqueda de pedidos pendientes
+
+# --- TikTok Shop (Open Platform) ----------------------------------------------
+# OAuth con código: el vendedor autoriza en auth.tiktok-shops.com y el code se
+# canjea SIN firma; el resto de llamadas van firmadas (HMAC-SHA256 con el App
+# Secret) contra open-api con el shop_cipher de la tienda autorizada.
+TIKTOK_AUTH_BASE = "https://auth.tiktok-shops.com"
+TIKTOK_AUTHORIZE_URL = f"{TIKTOK_AUTH_BASE}/oauth/authorize"
+TIKTOK_TOKEN_URL = f"{TIKTOK_AUTH_BASE}/api/v2/token/get"
+TIKTOK_REFRESH_URL = f"{TIKTOK_AUTH_BASE}/api/v2/token/refresh"
+TIKTOK_API_BASE = "https://open-api.tiktokglobalshop.com"
+TIKTOK_API_VERSION = "202309"
+
 # --- Empaquetado de etiquetas (n-up) ----------------------------------------
 # Hoja de destino para acomodar varias etiquetas y ahorrar papel. En puntos
 # PostScript (1 pt = 1/72"). Carta = 8.5" x 11" = 612 x 792 pt (misma

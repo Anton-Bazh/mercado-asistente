@@ -6,9 +6,16 @@ cola. Aísla errores: si una cuenta falla, las demás siguen.
 """
 from __future__ import annotations
 
+import label_stub
 import storage
 from providers.registry import get_provider
 from providers.base import ProviderError
+
+# Datos del pedido por envío, para armar el talón de control al momento de
+# pedir la etiqueta (get_label solo recibe el shipment_id). Se alimenta en
+# cada refresco de la cola; acotado para no crecer sin límite.
+_ORDER_INFO: dict[str, dict] = {}
+_ORDER_INFO_MAX = 800
 
 
 def connected_accounts() -> list[dict]:
@@ -61,6 +68,7 @@ def list_all_pending() -> dict:
             r["account_id"] = acc["id"]
             r["account_name"] = name
             r["provider"] = acc.get("provider")
+            _remember_order(r)
             already = (r.get("substatus") == "printed"
                        or str(r.get("shipment_id")) in recent)
             r["pending"] = not already
@@ -79,4 +87,26 @@ def get_label(account_id: str, shipment_id: str, fmt: str = "pdf"):
     acc = storage.get_account(account_id)
     if not acc:
         raise ProviderError("Cuenta no encontrada para el envío.")
-    return get_provider(acc["provider"]).get_label(acc, shipment_id, fmt)
+    content, ctype, fname = get_provider(acc["provider"]).get_label(acc, shipment_id, fmt)
+    # Talón de control de producto (Walmart/TikTok): solo PDF, y nunca debe
+    # bloquear la impresión si algo falla al dibujarlo.
+    if fmt == "pdf" and ctype.startswith("application/pdf") \
+            and label_stub.enabled_for(acc.get("provider", ""), acc.get("id")):
+        info = _ORDER_INFO.get(str(shipment_id))
+        if info and info.get("products"):
+            try:
+                content = label_stub.add_stub(content, info["products"],
+                                              order_ref=str(info.get("order_id") or ""))
+            except Exception:
+                pass
+    return content, ctype, fname
+
+
+def _remember_order(row: dict) -> None:
+    sid = str(row.get("shipment_id") or "")
+    if not sid:
+        return
+    _ORDER_INFO[sid] = {"products": row.get("products") or [],
+                        "order_id": row.get("order_id")}
+    while len(_ORDER_INFO) > _ORDER_INFO_MAX:
+        _ORDER_INFO.pop(next(iter(_ORDER_INFO)))

@@ -215,7 +215,8 @@ def _normalize(order: dict, shipment: dict) -> dict:
     address = ", ".join(p for p in parts if p)
     items = order.get("order_items") or []
     products = [{"title": (it.get("item") or {}).get("title", "—"),
-                 "quantity": it.get("quantity", 1)} for it in items]
+                 "quantity": it.get("quantity", 1),
+                 "sku": (it.get("item") or {}).get("seller_sku") or ""} for it in items]
     units = sum(int(p.get("quantity", 1) or 1) for p in products)
     return {
         "order_id": order.get("id"), "shipment_id": shipment.get("id"),
