@@ -93,6 +93,15 @@ def get_label(account_id: str, shipment_id: str, fmt: str = "pdf"):
     if fmt == "pdf" and ctype.startswith("application/pdf") \
             and label_stub.enabled_for(acc.get("provider", ""), acc.get("id")):
         info = _ORDER_INFO.get(str(shipment_id))
+        if not info:
+            # busca → planea → modifica: si el envío no está en caché (reinicio,
+            # reimpresión), se consulta el pedido al marketplace antes de talonar.
+            try:
+                for r in get_provider(acc["provider"]).list_ready(acc):
+                    _remember_order(r)
+            except ProviderError:
+                pass
+            info = _ORDER_INFO.get(str(shipment_id))
         if info and info.get("products"):
             try:
                 content = label_stub.add_stub(content, info["products"],

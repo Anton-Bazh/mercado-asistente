@@ -9,12 +9,13 @@ import json
 import time
 import uuid
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 import label_layout
 import label_stub
 import orders_hub
+import packing_list
 import pdf_import
 import print_jobs
 import printers
@@ -608,30 +609,144 @@ def stub_preview(provider: str = "walmart") -> Response:
 _PDF_IMPORTS: dict[str, dict] = {}
 
 
+def _match_walmart_api(meta: list[dict]) -> None:
+    """Cruza guías sin producto con los pedidos de las cuentas Walmart
+    conectadas (por purchaseOrderId / customerOrderId leídos de la guía)."""
+    pending = [m for m in meta if not m["products"] and
+               (m.get("order_id") or m.get("tracking"))]
+    if not pending:
+        return
+    accounts = [a for a in orders_hub.connected_accounts()
+                if a.get("provider") == "walmart"]
+    for acc in accounts:
+        try:
+            rows = get_provider("walmart").list_ready(acc)
+        except ProviderError:
+            continue
+        by_key: dict[str, list] = {}
+        for r in rows:
+            for k in (r.get("po"), r.get("order_id"), r.get("shipment_id")):
+                if k:
+                    by_key[str(k)] = r.get("products") or []
+        for m in pending:
+            for k in (m.get("order_id"), m.get("tracking")):
+                if k and str(k) in by_key and by_key[str(k)]:
+                    m["products"] = by_key[str(k)]
+                    m["matched"] = "api"
+                    break
+
+
+def _rebuild_import(imp: dict) -> None:
+    """Regenera el PDF final (talón + empaquetado n-up) desde las guías crudas."""
+    pdf = imp["raw"]
+    if label_stub.enabled_for(imp["provider"]):
+        pdf = tiktok_import.stub_per_page(pdf, imp["meta"])
+    imp["pdf"], imp["layout"] = label_layout.pack_labels_to_sheets(pdf)
+
+
+def _import_items(meta: list[dict]) -> list[dict]:
+    return [{"order_id": m.get("order_id"), "tracking": m.get("tracking"),
+             "buyer": m.get("buyer", ""), "matched": m.get("matched", ""),
+             "products": m["products"]} for m in meta]
+
+
 @app.post("/api/labels/import")
 async def labels_pdf_import(file: UploadFile = File(...),
-                            provider: str = Form("tiktok")) -> JSONResponse:
+                            provider: str = Form("tiktok"),
+                            packing: UploadFile | None = File(None)) -> JSONResponse:
     if provider not in pdf_import.PROVIDERS:
         raise HTTPException(status_code=400,
                             detail=f"Marketplace no soportado: {provider}")
     raw = await file.read()
-    with_stub = label_stub.enabled_for(provider)
     try:
-        pdf, meta = pdf_import.import_pdf(provider, raw, with_stub=with_stub)
+        guides, meta = pdf_import.import_pdf(provider, raw, with_stub=False)
     except pdf_import.PdfImportError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    packed, layout = label_layout.pack_labels_to_sheets(pdf)
+    if provider == "walmart":
+        _match_walmart_api(meta)
+    # Packing list adjunto (Excel de Walmart / Picking List PDF de TikTok):
+    # segunda fuente de producto, cruzada por PO/orden/cliente o por posición.
+    pack_stats = None
+    pack_orders: list[dict] = []
+    if packing is not None and packing.filename:
+        pdata = await packing.read()
+        try:
+            orders = packing_list.parse(pdata, packing.filename)
+            pack_stats = packing_list.match(meta, orders)
+            pack_stats["orders"] = len(orders)
+            # pedidos del packing list como opciones para asignación manual
+            # (guías rasterizadas sin OCR: el operador elige de una lista en
+            # lugar de teclear producto/SKU)
+            pack_orders = [{"po": o.get("po"), "order_id": o.get("order_id"),
+                            "buyer": o.get("buyer"), "products": o["products"]}
+                           for o in orders if o.get("products")]
+        except packing_list.PackingListError as exc:
+            raise HTTPException(status_code=400,
+                                detail=f"Packing list: {exc}")
     token = uuid.uuid4().hex[:12]
     while len(_PDF_IMPORTS) >= 5:
         _PDF_IMPORTS.pop(next(iter(_PDF_IMPORTS)))
-    _PDF_IMPORTS[token] = {"pdf": packed, "meta": meta, "ts": int(time.time()),
-                           "name": file.filename, "provider": provider}
+    imp = {"raw": guides, "meta": meta, "ts": int(time.time()),
+           "name": file.filename, "provider": provider}
+    _rebuild_import(imp)
+    _PDF_IMPORTS[token] = imp
     return JSONResponse({
-        "ok": True, "token": token, "guides": len(meta), "layout": layout,
-        "stub": with_stub, "provider": provider,
+        "ok": True, "token": token, "guides": len(meta), "layout": imp["layout"],
+        "stub": label_stub.enabled_for(provider), "provider": provider,
+        "ocr": pdf_import.ocr_available(), "packing": pack_stats,
+        "packing_orders": pack_orders,
         "without_product": sum(1 for m in meta if not m["products"]),
-        "items": [{"order_id": m["order_id"], "tracking": m["tracking"],
-                   "products": m["products"]} for m in meta],
+        "items": _import_items(meta),
+    })
+
+
+@app.post("/api/labels/import/{token}/products")
+async def labels_import_set_products(token: str, request: Request) -> JSONResponse:
+    """Captura manual: asigna producto/SKU/piezas a guías y regenera talones.
+
+    Body JSON: {"items": [{"index": 0, "title": "...", "sku": "...", "quantity": 2}]}
+    """
+    imp = _pdf_import_or_404(token)
+    try:
+        items = (await request.json()).get("items") or []
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Cuerpo JSON inválido.")
+    for it in items:
+        try:
+            i = int(it.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= i < len(imp["meta"])):
+            continue
+        # lista completa de productos (elegido del packing list) o captura simple
+        if isinstance(it.get("products"), list) and it["products"]:
+            products = [{"title": str(p.get("title") or "").strip(),
+                         "sku": str(p.get("sku") or "").strip(),
+                         "quantity": max(1, int(p.get("quantity") or 1))}
+                        for p in it["products"] if str(p.get("title") or "").strip()]
+            if not products:
+                continue
+        else:
+            title = str(it.get("title") or "").strip()
+            if not title:
+                continue
+            try:
+                qty = max(1, int(it.get("quantity") or 1))
+            except (TypeError, ValueError):
+                qty = 1
+            products = [{"title": title,
+                         "sku": str(it.get("sku") or "").strip(), "quantity": qty}]
+        imp["meta"][i]["products"] = products
+        imp["meta"][i]["matched"] = "manual"
+        if it.get("order_id"):
+            imp["meta"][i]["order_id"] = str(it["order_id"])
+        if it.get("buyer"):
+            imp["meta"][i]["buyer"] = str(it["buyer"])
+    _rebuild_import(imp)
+    return JSONResponse({
+        "ok": True, "guides": len(imp["meta"]), "layout": imp["layout"],
+        "without_product": sum(1 for m in imp["meta"] if not m["products"]),
+        "items": _import_items(imp["meta"]),
     })
 
 

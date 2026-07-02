@@ -587,13 +587,23 @@
               Sube el PDF de guías descargado del seller center; se procesa, se inyecta el talón
               de control (si está activo) y queda listo para imprimir.
             </div>
-            <div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
-              <select id="pdf-import-provider" style="border:1px solid #d8dbe1;border-radius:9px;padding:7px 10px;font:inherit;font-size:13px;outline:none">
-                <option value="tiktok">TikTok Shop</option>
-                <option value="walmart">Walmart</option>
-              </select>
-              <input type="file" id="pdf-import-file" accept="application/pdf" style="font-size:12.5px">
-              <button class="btn btn-accent" id="pdf-import-btn">Procesar PDF</button>
+            <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+              <div>
+                <div style="font-size:11px;font-weight:600;color:var(--label);margin-bottom:4px">Marketplace</div>
+                <select id="pdf-import-provider" style="border:1px solid #d8dbe1;border-radius:9px;padding:7px 10px;font:inherit;font-size:13px;outline:none">
+                  <option value="tiktok">TikTok Shop</option>
+                  <option value="walmart">Walmart</option>
+                </select>
+              </div>
+              <div>
+                <div style="font-size:11px;font-weight:600;color:var(--label);margin-bottom:4px">PDF de guías</div>
+                <input type="file" id="pdf-import-file" accept="application/pdf" style="font-size:12.5px">
+              </div>
+              <div>
+                <div style="font-size:11px;font-weight:600;color:var(--label);margin-bottom:4px">Packing list <span style="font-weight:400">(Excel de Walmart / Picking List de TikTok — opcional)</span></div>
+                <input type="file" id="pdf-import-packing" accept=".xlsx,.xlsm,application/pdf" style="font-size:12.5px">
+              </div>
+              <button class="btn btn-accent" id="pdf-import-btn">Procesar</button>
             </div>
             <div style="font-size:11px;color:var(--label);margin-top:8px" id="pdf-import-hint"></div>
             <div id="pdf-import-result" style="display:none;margin-top:14px"></div>

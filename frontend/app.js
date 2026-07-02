@@ -1341,14 +1341,63 @@ function init() {
 
   // importar PDF de etiquetas (TikTok Shop / Walmart)
   const PDF_IMPORT_HINTS = {
-    tiktok: 'Formato esperado: hoja Carta con 2 envíos (guía + packing list). Se recorta cada guía y se lee producto, SKU y piezas del packing list.',
-    walmart: 'Se toma cada página como una guía completa y se buscan producto/SKU/cantidad en el texto. Si tu PDF trae otro formato, compárteme un ejemplo para calibrar el recorte como en TikTok.',
+    tiktok: 'PDF de guías: hoja Carta con 2 envíos (guía + packing list); se recorta cada guía y se lee su producto. El Picking List (PDF) adjunto sirve de segunda fuente/validación por Order ID.',
+    walmart: 'Las guías FedEx de Walmart NO traen el producto. Adjunta el Excel «Pedidos_*.xlsx» del seller center: se cruza por PO/cliente (o por posición si la guía es imagen sin OCR). También cruza con la API si hay cuenta conectada; lo que falte se captura a mano.',
   };
   function syncPdfImportHint() {
     $('pdf-import-hint').textContent = PDF_IMPORT_HINTS[$('pdf-import-provider').value] || '';
   }
   syncPdfImportHint();
   $('pdf-import-provider').addEventListener('change', syncPdfImportHint);
+  const INP = 'border:1px solid #d8dbe1;border-radius:8px;padding:5px 8px;font:inherit;font-size:12px;outline:none';
+  function renderImportResult(d) {
+    const box = $('pdf-import-result');
+    const lay = d.layout || {};
+    const editable = d.without_product > 0;
+    const items = (d.items || []);
+    const shown = editable ? items : items.slice(0, 6);
+    const rows = shown.map((m, i) => {
+      const who = [m.order_id ? '#' + m.order_id : '', m.buyer || '', m.tracking ? 'TRK ' + m.tracking : '']
+        .filter(Boolean).join(' · ') || `guía ${i + 1}`;
+      const p = (m.products || [])[0];
+      if (p) {
+        const SRC = { api: ' · API', manual: ' · manual', excel: ' · packing list', posicion: ' · ⚠ por posición' };
+        const src = SRC[m.matched] || '';
+        const extra = (m.products.length > 1) ? ` (+${m.products.length - 1} más)` : '';
+        return `<div style="font-size:11.5px;color:${m.matched === 'posicion' ? '#b07400' : 'var(--muted)'};font-family:var(--mono);padding:3px 0">${esc(who)} → ${p.quantity || 1}× ${esc((p.title || '').slice(0, 44))}${extra}${src}</div>`;
+      }
+      const opts = (d.packing_orders || []).map((o, j) => {
+        const p0 = o.products[0] || {};
+        const extra = o.products.length > 1 ? ` +${o.products.length - 1}` : '';
+        const lbl = [o.po || o.order_id, o.buyer, `${p0.quantity || 1}× ${(p0.title || '').slice(0, 34)}${extra}`]
+          .filter(Boolean).join(' · ');
+        return `<option value="${j}">${esc(lbl)}</option>`;
+      }).join('');
+      const picker = opts
+        ? `<select data-f="pick" style="${INP};flex:1;min-width:230px"><option value="">— elegir pedido del packing list —</option>${opts}</select>` : '';
+      return `<div data-imp-row="${i}" style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;padding:5px 0;border-bottom:1px dashed #eceef2">
+        <span style="font-size:11.5px;color:var(--muted);font-family:var(--mono);flex:0 0 200px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(who)}">${esc(who)}</span>
+        ${picker}
+        <input data-f="title" placeholder="Producto (ej. WPC Gris 1M)" style="${INP};flex:1;min-width:150px">
+        <input data-f="sku" placeholder="SKU" style="${INP};width:110px">
+        <input data-f="quantity" type="number" value="1" min="1" title="Piezas" style="${INP};width:56px">
+      </div>`;
+    }).join('');
+    const warn = editable
+      ? `<div style="font-size:11.5px;color:#b07400;margin:8px 0 2px">⚠ ${d.without_product} guía(s) sin producto: adjunta el packing list (Excel/PDF) o captúralo arriba y pulsa «Aplicar talones».${d.ocr === false ? ' · OCR no instalado (sudo apt install tesseract-ocr tesseract-ocr-spa) para leer PO/destinatario de guías escaneadas.' : ''}</div>` : '';
+    const pk = d.packing
+      ? `<div style="font-size:11.5px;color:var(--muted);margin-top:2px">Packing list: ${d.packing.orders} pedido(s) leídos · ${d.packing.matched} cruzado(s) por identificador${d.packing.positional ? ` · <span style="color:#b07400">${d.packing.positional} por POSICIÓN — verifica que el orden del PDF coincida con el del packing list antes de imprimir</span>` : ''}</div>` : '';
+    box.innerHTML = `
+      <div style="font-size:13px;font-weight:700;margin-bottom:6px">${d.guides} guías detectadas → ${lay.sheets || '?'} hoja(s) Carta (${lay.labels_per_sheet || '?'} por hoja)${d.stub ? ' · talón activo' : ''}</div>
+      ${pk}
+      ${rows}${!editable && items.length > 6 ? `<div style="font-size:11.5px;color:var(--muted)">… y ${items.length - 6} más</div>` : ''}
+      ${warn}
+      <div class="btn-row" style="margin-top:11px">
+        ${editable ? '<button class="btn btn-accent" data-imp-act="apply">Aplicar talones</button>' : ''}
+        <button class="btn btn-ghost" data-imp-act="view">Ver PDF listo</button>
+        <button class="btn ${editable ? 'btn-ghost' : 'btn-accent'}" data-imp-act="print">Imprimir</button>
+      </div>`;
+  }
   $('pdf-import-btn').addEventListener('click', async () => {
     const f = $('pdf-import-file').files[0];
     const prov = $('pdf-import-provider').value;
@@ -1358,31 +1407,62 @@ function init() {
     box.innerHTML = '<span style="font-size:12.5px;color:var(--muted)">Procesando…</span>';
     try {
       const fd = new FormData(); fd.append('file', f); fd.append('provider', prov);
+      const pk = $('pdf-import-packing').files[0];
+      if (pk) fd.append('packing', pk);
       const d = await api('/api/labels/import', { method: 'POST', body: fd });
       state.pdfImport = d;
-      const lay = d.layout || {};
-      const items = (d.items || []).slice(0, 6).map(m => {
-        const p = (m.products || [])[0] || {};
-        return `<div style="font-size:11.5px;color:var(--muted);font-family:var(--mono)">#${esc(m.order_id || '—')} · ${p.quantity || 1}× ${esc((p.title || 'sin producto detectado').slice(0, 48))}</div>`;
-      }).join('');
-      const warn = d.without_product
-        ? `<div style="font-size:11.5px;color:#b07400;margin-top:4px">⚠ ${d.without_product} guía(s) sin producto detectado (salen sin talón).</div>` : '';
-      box.innerHTML = `
-        <div style="font-size:13px;font-weight:700;margin-bottom:6px">${d.guides} guías detectadas → ${lay.sheets || '?'} hoja(s) Carta (${lay.labels_per_sheet || '?'} por hoja)${d.stub ? ' · talón inyectado' : ''}</div>
-        ${items}${(d.items || []).length > 6 ? `<div style="font-size:11.5px;color:var(--muted)">… y ${d.items.length - 6} más</div>` : ''}
-        ${warn}
-        <div class="btn-row" style="margin-top:11px">
-          <button class="btn btn-ghost" data-imp-act="view">Ver PDF listo</button>
-          <button class="btn btn-accent" data-imp-act="print">Imprimir</button>
-        </div>`;
+      renderImportResult(d);
       log('OK', 'etiquetas', `${PROVIDER_LABEL[prov] || prov}: ${d.guides} guías importadas de «${f.name}».`);
     } catch (err) {
       box.innerHTML = `<span style="font-size:12.5px;color:#c0392b">${esc(err.message)}</span>`;
     }
   });
+  // al elegir un pedido del packing list, refleja sus datos en los campos
+  $('pdf-import-result').addEventListener('change', e => {
+    const sel = e.target.closest('[data-f="pick"]'); if (!sel) return;
+    const row = sel.closest('[data-imp-row]');
+    const o = sel.value !== '' ? (state.pdfImport.packing_orders || [])[parseInt(sel.value, 10)] : null;
+    const p = o ? (o.products[0] || {}) : {};
+    row.querySelector('[data-f="title"]').value = p.title || '';
+    row.querySelector('[data-f="sku"]').value = p.sku || '';
+    row.querySelector('[data-f="quantity"]').value = p.quantity || 1;
+  });
   $('pdf-import-result').addEventListener('click', async e => {
     const b = e.target.closest('[data-imp-act]'); if (!b || !state.pdfImport) return;
     const tok = state.pdfImport.token;
+    if (b.dataset.impAct === 'apply') {
+      const items = [];
+      $('pdf-import-result').querySelectorAll('[data-imp-row]').forEach(row => {
+        const pick = row.querySelector('[data-f="pick"]');
+        const chosen = pick && pick.value !== '' ? (state.pdfImport.packing_orders || [])[parseInt(pick.value, 10)] : null;
+        const title = row.querySelector('[data-f="title"]').value.trim();
+        if (chosen) {
+          items.push({
+            index: parseInt(row.dataset.impRow, 10), products: chosen.products,
+            order_id: chosen.po || chosen.order_id || '', buyer: chosen.buyer || '',
+          });
+        } else if (title) {
+          items.push({
+            index: parseInt(row.dataset.impRow, 10), title,
+            sku: row.querySelector('[data-f="sku"]').value.trim(),
+            quantity: parseInt(row.querySelector('[data-f="quantity"]').value, 10) || 1,
+          });
+        }
+      });
+      if (!items.length) { showBanner('Captura al menos un producto.', 'info'); return; }
+      b.disabled = true;
+      try {
+        const r = await api(`/api/labels/import/${tok}/products`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items }),
+        });
+        state.pdfImport = { ...state.pdfImport, ...r };
+        renderImportResult(state.pdfImport);
+        showBanner(`Talones aplicados a ${items.length} guía(s).`, 'success');
+        log('OK', 'etiquetas', `Importación: ${items.length} talón(es) capturados a mano.`);
+      } catch (err) { showBanner('No se pudo aplicar: ' + err.message, 'error'); b.disabled = false; }
+      return;
+    }
     if (b.dataset.impAct === 'view') { window.open(`/api/labels/import/${tok}/pdf`, '_blank'); return; }
     if (b.dataset.impAct === 'print') {
       const sheets = (state.pdfImport.layout || {}).sheets || '?';

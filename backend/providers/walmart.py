@@ -224,6 +224,7 @@ def _normalize(order: dict) -> dict:
 
     return {
         "order_id": order.get("customerOrderId") or po,
+        "po": po,   # purchaseOrderId: es el que viene impreso en la guía FedEx
         "shipment_id": tracking or f"PO{po}",
         "pack_id": None,
         "date_created": order.get("orderDate"),
