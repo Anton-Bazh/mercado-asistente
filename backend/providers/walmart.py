@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+import logutil
 import storage
 from config import (
     WALMART_TOKEN_URL, WALMART_ORDERS_URL, WALMART_LABELS_URL, WALMART_LABEL_URL,
@@ -25,6 +26,8 @@ from config import (
     HTTP_TIMEOUT, TOKEN_REFRESH_MARGIN,
 )
 from providers.base import Provider, ProviderError
+
+log = logutil.get_logger("walmart")
 
 # Marca en refresh_token: la cuenta quedó validada (no existe refresh real,
 # cada token se pide de nuevo con las credenciales).
@@ -72,6 +75,7 @@ class WalmartProvider(Provider):
         except httpx.HTTPError as exc:
             raise ProviderError(f"Error de red con Walmart: {exc}") from exc
         if resp.status_code != 200:
+            log.debug("Token Walmart rechazado (%d): %s", resp.status_code, resp.text[:500])
             raise ProviderError(_describe(resp))
         payload = resp.json()
         access = payload.get("access_token")
@@ -82,6 +86,7 @@ class WalmartProvider(Provider):
                                       account.get("refresh_token"), exp)
         account["access_token"] = access
         account["token_expires_at"] = exp
+        log.debug("%s token de 15 min obtenido.", logutil.account_ctx(account))
         return access
 
     def _valid_token(self, account: dict) -> str:
@@ -112,6 +117,8 @@ class WalmartProvider(Provider):
         except httpx.HTTPError as exc:
             raise ProviderError(f"Error de red: {exc}") from exc
         if resp.status_code == 401:
+            log.debug("%s 401 en %s; renovando token y reintentando…",
+                      logutil.account_ctx(account), url)
             self._fetch_token(account)
             try:
                 resp = httpx.request(method, url, params=params, json=json,
@@ -120,6 +127,8 @@ class WalmartProvider(Provider):
             except httpx.HTTPError as exc:
                 raise ProviderError(f"Error de red: {exc}") from exc
         if resp.status_code >= 400:
+            log.debug("%s %s %s → %d: %s", logutil.account_ctx(account),
+                      method, url, resp.status_code, resp.text[:500])
             raise ProviderError(f"Walmart respondió {resp.status_code}: {resp.text[:200]}")
         return resp
 

@@ -96,6 +96,30 @@
   /* queue list */
   .q-item{display:flex;align-items:center;gap:11px;padding:9px 8px;border-radius:9px;animation:effade .25s ease}
   .q-item:hover{background:#f6f7f9}
+  /* tarjeta v2: franja de marketplace + tags */
+  .q-item.mk{position:relative;overflow:hidden;align-items:flex-start;border:1px solid var(--line);background:#fff;padding:10px 12px 10px 16px;margin:0 2px}
+  .q-item.mk:hover{border-color:#c9cedd;background:#fff}
+  .q-item.mk::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--mkc,#cfd3da)}
+  .q-qty{font-family:var(--mono);font-size:10.5px;font-weight:700;color:#b07400;background:#fbf2dd;border-radius:5px;padding:0 5px;flex:0 0 auto;vertical-align:1px;margin-left:6px}
+  .q-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+  .qtag{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;border-radius:5px;padding:1.5px 6px;background:#f2f3f6;color:var(--ink2)}
+  .qtag i{width:6px;height:6px;border-radius:2px;display:inline-block;background:var(--mkc,#cfd3da)}
+  .qtag.stub{background:#eef5ee;color:#3e7048}
+  .qtag.time{color:var(--muted2);background:transparent;padding-left:0}
+  /* KPIs v2: desglose */
+  .kpi-break{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px;min-height:18px}
+  .mkchip{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;color:var(--ink2);background:#f2f3f6;border-radius:999px;padding:2px 8px}
+  .mkchip i{width:7px;height:7px;border-radius:2px;display:inline-block}
+  /* filtro de tiendas (chips) */
+  .fchips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:0}
+  .fchip{display:inline-flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:7px 14px;font:600 12.5px var(--sans,inherit);color:var(--ink2);cursor:pointer}
+  .fchip .n{font-family:var(--mono);font-size:11.5px;color:var(--muted);background:#f2f3f6;border-radius:999px;padding:1px 7px}
+  .fchip.on{border-color:var(--accent);background:var(--accent-tint);color:var(--accent)}
+  .fchip.on .n{background:rgba(47,107,240,.16);color:var(--accent)}
+  .fchip i{width:8px;height:8px;border-radius:2px;display:inline-block}
+  .fchip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  /* origen del lote */
+  .origin-badge{font-size:10.5px;font-weight:700;letter-spacing:.7px;border-radius:6px;padding:3px 8px;background:var(--accent-tint);color:var(--accent);white-space:nowrap}
   .q-pos{font-family:var(--mono);font-size:12px;color:var(--label);width:18px;text-align:right}
   .q-title{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .q-sub{font-size:11.5px;color:var(--muted2);font-family:var(--mono)}
@@ -254,10 +278,10 @@
       <section class="tab" data-tab="cola">
         <div class="wrap" style="max-width:1180px">
           <div class="kpis">
-            <div class="card card-13"><div class="kpi-label">Pendientes por imprimir</div><div class="kpi-row"><span class="kpi-num" id="kpi-pendientes">—</span><span class="kpi-tag" style="color:#c0a000">faltan</span></div></div>
-            <div class="card card-13"><div class="kpi-label">Seleccionadas</div><div class="kpi-row"><span class="kpi-num" id="kpi-encola">—</span><span class="kpi-tag" style="color:var(--accent)">a imprimir</span></div></div>
-            <div class="card card-13"><div class="kpi-label">Formato activo</div><div class="kpi-row"><span class="kpi-num" id="kpi-formato" style="font-size:22px">PDF</span><span class="kpi-tag" style="color:var(--muted)">salida</span></div></div>
-            <div class="card card-13"><div class="kpi-label">Impresas hoy</div><div class="kpi-row"><span class="kpi-num" id="kpi-hoy" style="color:#15a05a">0</span><span class="kpi-tag" style="color:#15a05a">✓</span></div></div>
+            <div class="card card-13"><div class="kpi-label">Pendientes por imprimir</div><div class="kpi-row"><span class="kpi-num" id="kpi-pendientes">—</span><span class="kpi-tag" style="color:#c0a000">faltan</span></div><div class="kpi-break" id="kpi-pend-break"></div></div>
+            <div class="card card-13"><div class="kpi-label">Seleccionadas</div><div class="kpi-row"><span class="kpi-num" id="kpi-encola">—</span><span class="kpi-tag" style="color:var(--accent)">a imprimir</span></div><div class="kpi-break"><span class="mkchip">manual</span></div></div>
+            <div class="card card-13"><div class="kpi-label">Impresas hoy</div><div class="kpi-row"><span class="kpi-num" id="kpi-hoy" style="color:#15a05a">0</span><span class="kpi-tag" style="color:#15a05a">✓</span></div><div class="kpi-break" id="kpi-hoy-break"></div></div>
+            <div class="card card-13" id="kpi-auto-card"><div class="kpi-label">Automático</div><div class="kpi-row"><span class="kpi-num" id="kpi-auto" style="font-size:17px;color:var(--muted2)">—</span><span class="pdot" id="kpi-auto-dot" style="width:9px;height:9px;border-radius:50%;background:#aab0bb"></span></div><div class="kpi-break" id="kpi-auto-sub" style="font-size:11px;color:var(--muted);font-family:var(--mono)"></div></div>
           </div>
 
           <!-- aviso de etiquetas en riesgo -->
@@ -266,6 +290,9 @@
             <span style="flex:1"><strong id="risk-count">0</strong> etiqueta(s) quedaron <strong>en riesgo</strong>: se pidieron a Mercado Libre pero no se confirmó su impresión. Revísalas y reimprímelas.</span>
             <button class="btn btn-ghost" id="risk-review" style="border-color:#e5d18a;white-space:nowrap">Revisar</button>
           </div>
+
+          <!-- tiendas con error de conexión (una tarjeta por tienda caída) -->
+          <div id="store-errors" style="display:none;flex-direction:column;gap:10px"></div>
 
           <!-- barra de operación: impresora, formato y acción -->
           <div class="card" style="padding:13px 18px">
@@ -285,10 +312,6 @@
                   <button class="seg-btn" data-format="zpl" style="padding:6px 15px">ZPL</button>
                 </div>
               </div>
-              <div style="display:flex;align-items:center;gap:9px" id="store-filter-wrap">
-                <span style="font-size:12px;font-weight:600;color:var(--ink2)">Tienda</span>
-                <select id="store-filter" style="border:1px solid #d8dbe1;border-radius:9px;padding:8px 11px;font:inherit;font-size:13px;outline:none;max-width:200px"><option value="all">Todas</option></select>
-              </div>
               <div class="btn-row" style="margin-left:auto">
                 <button class="btn btn-ghost" id="btn-reload">Actualizar</button>
                 <button class="btn btn-accent" id="btn-print-pending">Imprimir todo lo pendiente (<span id="print-pending-count">0</span>)</button>
@@ -301,14 +324,18 @@
             </div>
           </div>
 
+          <!-- filtro por tienda (chips con conteo y estado) -->
+          <div class="fchips" id="store-chips" style="display:none"></div>
+
           <!-- progreso del lote (visible mientras imprime) -->
-          <div id="batch-panel" class="card" style="display:none;padding:16px 18px">
+          <div id="batch-panel" class="card" style="display:none;padding:16px 18px;border-left:4px solid var(--accent)">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
               <div style="display:flex;align-items:center;gap:11px;min-width:0">
                 <span class="pdot" id="batch-dot" style="width:9px;height:9px;border-radius:50%;background:var(--accent);animation:efpulse 1.4s infinite"></span>
                 <div style="min-width:0">
-                  <div style="font-size:13px;font-weight:600" id="batch-title">Imprimiendo lote…</div>
+                  <div style="font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span id="batch-title">Imprimiendo lote…</span><span class="origin-badge" id="batch-origin" style="display:none"></span></div>
                   <div style="font-size:12px;color:var(--muted)" id="batch-msg">—</div>
+                  <div style="font-size:12px;color:var(--muted);display:none" id="batch-now"></div>
                 </div>
               </div>
               <div style="display:flex;align-items:center;gap:14px">
@@ -645,7 +672,7 @@
         <div class="wrap" style="max-width:1080px">
           <div class="log-filters" id="log-filters"></div>
           <div class="card" style="padding:0;overflow:hidden">
-            <div class="log-head"><span style="width:96px">Hora</span><span style="width:74px">Nivel</span><span style="width:130px">Módulo</span><span style="flex:1">Evento</span></div>
+            <div class="log-head"><span style="width:112px">Hora</span><span style="width:84px">Nivel</span><span style="width:110px">Módulo</span><span style="flex:1">Evento</span></div>
             <div style="max-height:560px;overflow-y:auto" id="log-rows"></div>
           </div>
         </div>

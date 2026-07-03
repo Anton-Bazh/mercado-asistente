@@ -30,8 +30,11 @@ if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
 fi
 
 # 3) Lanzar servidor
+# Sin access log en consola: la traza HTTP completa (cada request, con estado
+# y duración) queda en data/logs/etiquetaflow.log a nivel DEBUG.
 echo "→ Servidor en https://localhost:${PORT}"
 exec uvicorn main:app \
   --app-dir backend \
   --host "$HOST" --port "$PORT" \
-  --ssl-keyfile "$KEY" --ssl-certfile "$CERT"
+  --ssl-keyfile "$KEY" --ssl-certfile "$CERT" \
+  --no-access-log

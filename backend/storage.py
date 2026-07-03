@@ -17,7 +17,10 @@ from typing import Optional
 
 from cryptography.fernet import Fernet
 
+import logutil
 from config import DB_PATH, DATA_DIR, KEY_PATH
+
+log = logutil.get_logger("almacen")
 
 # Claves de configuración (no sensibles salvo las marcadas)
 APP_ID = "app_id"
@@ -57,6 +60,7 @@ def _ensure_key() -> bytes:
     with os.fdopen(fd, "wb") as f:
         f.write(key)
     os.chmod(KEY_PATH, 0o600)
+    log.info("Clave de cifrado nueva generada en %s (0600).", KEY_PATH)
     return key
 
 
@@ -96,9 +100,18 @@ def _connect() -> sqlite3.Connection:
         conn.execute("ALTER TABLE print_history ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'")
         # Deriva el estado de las filas antiguas: ok=1→'ok', ok=0→'error'.
         conn.execute("UPDATE print_history SET status = CASE WHEN ok = 1 THEN 'ok' ELSE 'error' END")
+        log.info("Migración: columna 'status' añadida a print_history.")
     if "account" not in cols:
         try:
             conn.execute("ALTER TABLE print_history ADD COLUMN account TEXT")
+            log.info("Migración: columna 'account' añadida a print_history.")
+        except sqlite3.OperationalError:
+            pass
+    if "origin" not in cols:
+        # 'manual' | 'auto' — quién arrancó la impresión (persona o scheduler)
+        try:
+            conn.execute("ALTER TABLE print_history ADD COLUMN origin TEXT")
+            log.info("Migración: columna 'origin' añadida a print_history.")
         except sqlite3.OperationalError:
             pass
     conn.execute(
@@ -193,7 +206,7 @@ def set_many(items: dict[str, Optional[str]]) -> None:
 _HISTORY_COLS = (
     "id", "ts", "batch_id", "shipment_id", "order_id", "buyer_name",
     "product_summary", "format", "printer", "sheets", "ok", "status", "error",
-    "account",
+    "account", "origin",
 )
 
 
@@ -209,6 +222,7 @@ def add_print_history(
     sheets: Optional[int] = None,
     error: Optional[str] = None,
     account: Optional[str] = None,
+    origin: str = "manual",
     ts: Optional[int] = None,
 ) -> None:
     """Registra un intento de impresión de un envío con su estado."""
@@ -219,14 +233,15 @@ def add_print_history(
             conn.execute(
                 "INSERT INTO print_history"
                 " (ts, batch_id, shipment_id, order_id, buyer_name,"
-                "  product_summary, format, printer, sheets, ok, status, error, account)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  product_summary, format, printer, sheets, ok, status, error,"
+                "  account, origin)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ts if ts is not None else int(time.time()),
                     batch_id, str(shipment_id),
                     str(order_id) if order_id is not None else None,
                     buyer_name, product_summary, fmt, printer, sheets,
-                    ok, status, error, account,
+                    ok, status, error, account, origin,
                 ),
             )
             conn.commit()
@@ -285,19 +300,29 @@ def list_print_history(
 
 def count_print_history_today() -> int:
     """Cuenta impresiones exitosas del día local en curso."""
+    return count_print_history_today_split()["total"]
+
+
+def count_print_history_today_split() -> dict:
+    """Impresiones exitosas de hoy, desglosadas por origen (auto/manual)."""
     now = time.localtime()
     start = int(time.mktime((now.tm_year, now.tm_mon, now.tm_mday,
                              0, 0, 0, 0, 0, -1)))
     with _lock:
         conn = _connect()
         try:
-            n = conn.execute(
-                "SELECT COUNT(*) FROM print_history WHERE status = 'ok' AND ts >= ?",
+            rows = conn.execute(
+                "SELECT COALESCE(origin, 'manual'), COUNT(*) FROM print_history"
+                " WHERE status = 'ok' AND ts >= ? GROUP BY 1",
                 (start,),
-            ).fetchone()[0]
+            ).fetchall()
         finally:
             conn.close()
-    return int(n)
+    split = {"auto": 0, "manual": 0}
+    for origin, n in rows:
+        split["auto" if origin == "auto" else "manual"] += int(n)
+    split["total"] = split["auto"] + split["manual"]
+    return split
 
 
 def count_risk() -> int:

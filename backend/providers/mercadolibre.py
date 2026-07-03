@@ -13,12 +13,15 @@ from urllib.parse import urlencode
 
 import httpx
 
+import logutil
 import storage
 from config import (
     AUTHORIZATION_URL, TOKEN_URL, USERS_ME_URL, ORDERS_SEARCH_URL,
     SHIPMENTS_URL, LABELS_URL, HTTP_TIMEOUT, TOKEN_REFRESH_MARGIN,
 )
 from providers.base import Provider, ProviderError
+
+log = logutil.get_logger("ml")
 
 
 def _pkce() -> tuple[str, str]:
@@ -74,6 +77,9 @@ class MLProvider(Provider):
             "refresh_token": account["refresh_token"],
         }
         self._store(account, self._token_request(data))
+        log.info("%s token renovado (expira en %d min).",
+                 logutil.account_ctx(account),
+                 (int(account.get("token_expires_at") or 0) - int(time.time())) // 60)
         return account["access_token"]
 
     def _token_request(self, data: dict) -> dict:
@@ -83,6 +89,7 @@ class MLProvider(Provider):
         except httpx.HTTPError as exc:
             raise ProviderError(f"Error de red con Mercado Libre: {exc}") from exc
         if resp.status_code != 200:
+            log.debug("Token ML rechazado (%d): %s", resp.status_code, resp.text[:500])
             raise ProviderError(_describe(resp))
         return resp.json()
 
@@ -127,6 +134,8 @@ class MLProvider(Provider):
         except httpx.HTTPError as exc:
             raise ProviderError(f"Error de red: {exc}") from exc
         if resp.status_code == 401:
+            log.debug("%s 401 en %s; renovando token y reintentando…",
+                      logutil.account_ctx(account), url)
             self.refresh(account)
             headers = {**self._headers(account), **(extra_headers or {})}
             try:
@@ -134,6 +143,8 @@ class MLProvider(Provider):
             except httpx.HTTPError as exc:
                 raise ProviderError(f"Error de red: {exc}") from exc
         if resp.status_code >= 400:
+            log.debug("%s GET %s → %d: %s", logutil.account_ctx(account),
+                      url, resp.status_code, resp.text[:500])
             raise ProviderError(f"La API respondió {resp.status_code}: {resp.text[:200]}")
         return resp
 

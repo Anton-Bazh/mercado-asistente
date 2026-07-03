@@ -18,7 +18,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import logutil
 from config import STAMP_PATH
+
+log = logutil.get_logger("cups")
 
 
 class PrinterError(Exception):
@@ -276,8 +279,19 @@ def refresh_readiness() -> None:
         except PrinterError:
             fresh[name] = {"ready": False, "reason": "No se pudo consultar", "shared": False}
     with _readiness_lock:
+        old = dict(_readiness_cache)
         _readiness_cache.clear()
         _readiness_cache.update(fresh)
+    # Loguear solo transiciones (el monitor sondea cada pocos segundos).
+    for name, r in fresh.items():
+        prev = old.get(name)
+        if prev is not None and prev.get("ready") == r["ready"]:
+            continue
+        if r["ready"]:
+            if prev is not None:
+                log.info("Impresora «%s» volvió a estar lista.", name)
+        elif not r.get("shared"):
+            log.warning("Impresora «%s» NO lista: %s", name, r.get("reason") or "?")
 
 
 def _cached_readiness(name: str, uri: str, accepting: bool) -> dict:
@@ -315,10 +329,12 @@ def start_readiness_monitor(interval: float = 8.0) -> None:
             try:
                 refresh_readiness()
             except Exception:
-                pass
+                log.exception("Fallo inesperado del monitor de impresoras "
+                              "(el hilo sigue vivo).")
             time.sleep(interval)
 
-    threading.Thread(target=_loop, daemon=True).start()
+    threading.Thread(target=_loop, daemon=True, name="monitor-cups").start()
+    log.debug("Monitor de impresoras arrancado (sondeo cada %.0f s).", interval)
 
 
 def _probe_network(uri: str) -> tuple[bool, str]:
@@ -475,9 +491,12 @@ def add_printer(name: str, uri: str, everywhere: bool = True) -> dict:
         if everywhere:
             cp2 = _run(["lpadmin", "-p", safe, "-E", "-v", uri])
             if cp2.returncode == 0:
+                log.info("Impresora «%s» dada de alta (%s) sin IPP Everywhere.", safe, uri)
                 return {"name": safe, "uri": uri}
             err = (cp2.stderr or b"").decode(errors="replace").strip() or err
+        log.error("No se pudo dar de alta «%s» (%s): %s", safe, uri, err or "lpadmin")
         raise PrinterError(f"No se pudo dar de alta la impresora: {err or 'error de lpadmin'}")
+    log.info("Impresora «%s» dada de alta (%s).", safe, uri)
     return {"name": safe, "uri": uri}
 
 
@@ -504,6 +523,7 @@ def remove_printer(name: str) -> None:
     if cp.returncode != 0:
         err = (cp.stderr or b"").decode(errors="replace").strip()
         raise PrinterError(f"No se pudo eliminar: {err or name}")
+    log.info("Impresora «%s» eliminada de CUPS.", name)
 
 
 def set_default(name: str) -> None:
@@ -534,7 +554,10 @@ def print_bytes(printer: str, data: bytes, raw: bool = False, title: str = "etiq
     if raw:
         args += ["-o", "raw"]
     args += ["--", "-"]  # leer de stdin
-    return _lp(args, data)
+    job = _lp(args, data)
+    log.debug("Enviado «%s» a «%s» (%.0f KB%s) → job %s",
+              title, printer, len(data) / 1024, ", raw" if raw else "", job)
+    return job
 
 
 def print_network_raw(ip: str, data: bytes, port: int = 9100) -> str:

@@ -12,6 +12,10 @@ import uuid
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+import logutil
+
+logutil.setup()   # antes de importar módulos que crean loggers/hilos
+
 import label_layout
 import label_stub
 import orders_hub
@@ -26,7 +30,31 @@ from config import FRONTEND_DIR, SITE_ID, STAMP_PATH
 from providers.base import ProviderError
 from providers.registry import CATALOG, get_provider
 
+log = logutil.get_logger("servidor")
+
 app = FastAPI(title="Mercado Asistente", docs_url=None, redoc_url=None)
+
+
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    """Traza HTTP completa al archivo (DEBUG); 4xx/5xx también a consola."""
+    t0 = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        log.exception("%s %s → excepción no controlada",
+                      request.method, request.url.path)
+        raise
+    ms = (time.perf_counter() - t0) * 1000
+    line = ("%s %s → %d (%.0f ms)",
+            request.method, request.url.path, response.status_code, ms)
+    if response.status_code >= 500:
+        log.error(*line)
+    elif response.status_code >= 400:
+        log.warning(*line)
+    else:
+        log.debug(*line)
+    return response
 
 
 # --- Sello del sistema -------------------------------------------------------
@@ -58,6 +86,11 @@ def _startup() -> None:
     printers.start_readiness_monitor()   # sondeo activo de impresoras en 2.º plano
     scheduler.start_scheduler()          # modo automático por horario (servidor)
     _stamp_banner("EtiquetaFlow · sello de sistema · servidor iniciado")
+    accs = storage.list_accounts()
+    log.info("Servidor iniciado · %d cuenta(s) (%d conectada(s)) · log detallado en %s",
+             len(accs),
+             sum(1 for a in accs if a.get("refresh_token") and a.get("enabled")),
+             logutil.LOG_FILE)
 
 
 # --- Vistas (HTML) -----------------------------------------------------------
@@ -117,20 +150,26 @@ def save_account(provider: str = Form("ml"), name: str = Form(""),
     if client_secret.strip():   # vacío = conservar el existente
         fields["client_secret"] = client_secret.strip()
     storage.upsert_account(aid, **fields)
+    log.info("%s cuenta %s (id %s)", logutil.ctx(provider, fields["name"]),
+             "actualizada" if account_id.strip() else "creada", aid)
     return JSONResponse({"ok": True, "account_id": aid})
 
 
 @app.delete("/api/accounts/{account_id}")
 def del_account(account_id: str) -> JSONResponse:
-    _account_or_404(account_id)
+    acc = _account_or_404(account_id)
     storage.delete_account(account_id)
+    log.info("%s cuenta eliminada (id %s)", logutil.account_ctx(acc), account_id)
     return JSONResponse({"ok": True})
 
 
 @app.post("/api/accounts/{account_id}/enabled")
 def enable_account(account_id: str, enabled: str = Form("1")) -> JSONResponse:
-    _account_or_404(account_id)
-    storage.set_account_enabled(account_id, enabled in ("1", "true", "on", "True"))
+    acc = _account_or_404(account_id)
+    on = enabled in ("1", "true", "on", "True")
+    storage.set_account_enabled(account_id, on)
+    log.info("%s cuenta %s", logutil.account_ctx(acc),
+             "habilitada" if on else "deshabilitada")
     return JSONResponse({"ok": True})
 
 
@@ -143,7 +182,9 @@ def account_connect(account_id: str) -> JSONResponse:
         try:
             provider.connect(acc)
         except ProviderError as exc:
+            log.warning("%s conexión fallida: %s", logutil.account_ctx(acc), exc)
             raise HTTPException(status_code=400, detail=str(exc))
+        log.info("%s cuenta conectada (credenciales validadas)", logutil.account_ctx(acc))
         return JSONResponse({"connected": True})
     state = uuid.uuid4().hex
     storage.set_value("oauthstate_" + state, account_id)
@@ -159,20 +200,27 @@ def callback(code: str | None = None, state: str | None = None,
              error: str | None = None) -> Response:
     """Redirección OAuth: resuelve la cuenta por 'state'."""
     if error:
+        log.warning("OAuth: el proveedor devolvió un error en el callback: %s", error)
         return _callback_html(False, f"El proveedor devolvió un error: {error}")
     if not code or not state:
+        log.warning("OAuth: callback sin code/state.")
         return _callback_html(False, "Faltan parámetros (code/state).")
     account_id = storage.get_value("oauthstate_" + state)
     if not account_id:
+        log.warning("OAuth: state no reconocido en el callback.")
         return _callback_html(False, "Sesión de conexión no reconocida (state).")
     acc = storage.get_account(account_id)
     if not acc:
+        log.warning("OAuth: la cuenta %s ya no existe al volver del callback.", account_id)
         return _callback_html(False, "La cuenta ya no existe.")
     try:
         get_provider(acc["provider"]).exchange_code(acc, code)
     except ProviderError as exc:
+        log.error("%s OAuth: fallo al canjear el código: %s",
+                  logutil.account_ctx(acc), exc)
         return _callback_html(False, str(exc))
     storage.delete_value("oauthstate_" + state)
+    log.info("%s cuenta conectada vía OAuth", logutil.account_ctx(acc))
     return _callback_html(True, f"Tienda «{acc.get('name') or acc.get('nickname') or ''}» conectada.")
 
 
@@ -182,7 +230,9 @@ def account_connect_manual(account_id: str, code: str = Form(...)) -> JSONRespon
     try:
         get_provider(acc["provider"]).exchange_code(acc, code.strip())
     except ProviderError as exc:
+        log.error("%s conexión manual fallida: %s", logutil.account_ctx(acc), exc)
         raise HTTPException(status_code=400, detail=str(exc))
+    log.info("%s cuenta conectada (código manual)", logutil.account_ctx(acc))
     return JSONResponse({"ok": True})
 
 
@@ -192,14 +242,17 @@ def account_refresh(account_id: str) -> JSONResponse:
     try:
         get_provider(acc["provider"]).refresh(acc)
     except ProviderError as exc:
+        log.warning("%s no se pudo renovar el token: %s", logutil.account_ctx(acc), exc)
         raise HTTPException(status_code=400, detail=str(exc))
+    log.info("%s token renovado manualmente", logutil.account_ctx(acc))
     return JSONResponse({"ok": True})
 
 
 @app.post("/api/accounts/{account_id}/disconnect")
 def account_disconnect(account_id: str) -> JSONResponse:
-    _account_or_404(account_id)
+    acc = _account_or_404(account_id)
     storage.clear_account_tokens(account_id)
+    log.info("%s cuenta desconectada (tokens borrados)", logutil.account_ctx(acc))
     return JSONResponse({"ok": True})
 
 
@@ -219,7 +272,9 @@ def status() -> JSONResponse:
 @app.get("/api/orders")
 def orders() -> JSONResponse:
     data = orders_hub.list_all_pending()
-    data["printed_today"] = storage.count_print_history_today()
+    split = storage.count_print_history_today_split()
+    data["printed_today"] = split["total"]
+    data["printed_split"] = split
     return JSONResponse(data)
 
 
@@ -342,7 +397,9 @@ def test_printer(name: str) -> JSONResponse:
         res = printers.test_print(name)
     except printers.PrinterError as exc:
         _stamp_banner(f"FALLO CRÍTICO DE IMPRESIÓN · prueba en «{name}» · {exc}")
+        log.error("Página de prueba fallida en «%s»: %s", name, exc, exc_info=True)
         raise HTTPException(status_code=502, detail=str(exc))
+    log.info("Página de prueba enviada a «%s»", name)
     return JSONResponse({"ok": True, **res})
 
 
@@ -392,11 +449,15 @@ def print_label(shipment_id: str, format: str = Form("pdf"),
         raise HTTPException(status_code=400, detail="Falta la tienda del envío (account_id).")
     target = _resolve_target(printer)
 
+    lctx = logutil.ctx(info.get("provider"), info.get("account_name"))
+
     # 1) Verificación previa: si la impresora no está lista, NO se pide la etiqueta.
     ok, reason = printers.preflight(target)
     if not ok:
         _record1(shipment_id, fmt, "blocked", info, target, None,
                  f"No se pidió la etiqueta: {reason}")
+        log.warning("%s envío %s BLOQUEADO sin pedir etiqueta — impresora «%s»: %s",
+                    lctx, shipment_id, target, reason)
         raise HTTPException(
             status_code=409,
             detail=(f"No se imprimió para no perder la etiqueta: {reason} "
@@ -404,10 +465,13 @@ def print_label(shipment_id: str, format: str = Form("pdf"),
         )
 
     # 2) Pedir la etiqueta al proveedor de esa tienda (aquí se marca impresa).
+    log.info("%s imprimiendo envío %s (%s) en «%s»", lctx, shipment_id, fmt, target)
     try:
         content, _ctype, _fn = orders_hub.get_label(account_id, shipment_id, fmt)
     except ProviderError as exc:
         _record1(shipment_id, fmt, "blocked", info, target, None, str(exc))
+        log.error("%s no se pudo pedir la etiqueta del envío %s: %s",
+                  lctx, shipment_id, exc)
         raise HTTPException(status_code=502, detail=str(exc))
 
     # 3) Enviar a la impresora.
@@ -417,6 +481,8 @@ def print_label(shipment_id: str, format: str = Form("pdf"),
     except printers.PrinterError as exc:
         _stamp_banner(f"FALLO CRÍTICO DE IMPRESIÓN · impresora «{target}» · {exc}")
         _record1(shipment_id, fmt, "risk", info, target, None, str(exc))
+        log.critical("%s envío %s EN RIESGO — la impresora «%s» falló al recibir: %s",
+                     lctx, shipment_id, target, exc, exc_info=True)
         raise HTTPException(status_code=502, detail=(
             f"Se pidió la etiqueta pero la impresora falló: {exc} "
             "Quedó marcada EN RIESGO: revísala en Historial."))
@@ -425,8 +491,11 @@ def print_label(shipment_id: str, format: str = Form("pdf"),
     result, why = printers.wait_for_job(target, job)
     if result == "completed":
         _record1(shipment_id, fmt, "ok", info, target, 1, None)
+        log.info("%s envío %s impreso y confirmado (job %s)", lctx, shipment_id, job)
         return JSONResponse({"ok": True, "printer": target, "job": job})
     _record1(shipment_id, fmt, "risk", info, target, None, why)
+    log.error("%s envío %s EN RIESGO — enviado sin confirmar (job %s): %s",
+              lctx, shipment_id, job, why)
     raise HTTPException(status_code=502, detail=(
         f"Se envió pero no se confirmó la impresión: {why} "
         "Quedó EN RIESGO: revísala en Historial."))
@@ -477,7 +546,11 @@ def auto_split(shipment_id: str = Form(...), order_id: str = Form(...),
     try:
         res = get_provider(acc["provider"]).split(acc, shipment_id, order_id, quantity, reason)
     except ProviderError as exc:
+        log.error("%s separación del envío %s fallida: %s",
+                  logutil.account_ctx(acc), shipment_id, exc)
         raise HTTPException(status_code=502, detail=str(exc))
+    log.info("%s envío %s separado (pedido %s, %d pieza(s), motivo %s)",
+             logutil.account_ctx(acc), shipment_id, order_id, quantity, reason)
     return JSONResponse({"ok": True, "result": res})
 
 
@@ -497,12 +570,19 @@ def auto_config(enabled: str = Form("0"), interval_min: int = Form(30),
             interval_min, multiunit_threshold, rules_data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    log.info("Modo automático %s (revisión cada %d min, umbral multi-unidad %d%s)",
+             "ACTIVADO" if cfg["enabled"] else "desactivado",
+             cfg["interval_min"], cfg["multiunit_threshold"],
+             ", reglas actualizadas" if rules_data is not None else "")
     return JSONResponse({"ok": True, "config": cfg})
 
 
 @app.post("/api/batch/stop")
 def batch_stop() -> JSONResponse:
-    return JSONResponse({"ok": print_jobs.stop()})
+    stopped = print_jobs.stop()
+    if stopped:
+        log.info("El operador solicitó detener el lote en curso.")
+    return JSONResponse({"ok": stopped})
 
 
 # --- Vista previa del acomodo (n-up) -----------------------------------------
@@ -658,9 +738,11 @@ async def labels_pdf_import(file: UploadFile = File(...),
         raise HTTPException(status_code=400,
                             detail=f"Marketplace no soportado: {provider}")
     raw = await file.read()
+    log.info("Importando PDF «%s» (%s, %.0f KB)…", file.filename, provider, len(raw) / 1024)
     try:
         guides, meta = pdf_import.import_pdf(provider, raw, with_stub=False)
     except pdf_import.PdfImportError as exc:
+        log.warning("Importación de «%s» rechazada: %s", file.filename, exc)
         raise HTTPException(status_code=400, detail=str(exc))
     if provider == "walmart":
         _match_walmart_api(meta)
@@ -681,6 +763,7 @@ async def labels_pdf_import(file: UploadFile = File(...),
                             "buyer": o.get("buyer"), "products": o["products"]}
                            for o in orders if o.get("products")]
         except packing_list.PackingListError as exc:
+            log.warning("Packing list «%s» rechazado: %s", packing.filename, exc)
             raise HTTPException(status_code=400,
                                 detail=f"Packing list: {exc}")
     token = uuid.uuid4().hex[:12]
@@ -690,6 +773,9 @@ async def labels_pdf_import(file: UploadFile = File(...),
            "name": file.filename, "provider": provider}
     _rebuild_import(imp)
     _PDF_IMPORTS[token] = imp
+    log.info("Importación %s lista: %d guía(s), %d sin producto%s",
+             token, len(meta), sum(1 for m in meta if not m["products"]),
+             f", packing list {pack_stats}" if pack_stats else "")
     return JSONResponse({
         "ok": True, "token": token, "guides": len(meta), "layout": imp["layout"],
         "stub": label_stub.enabled_for(provider), "provider": provider,
@@ -771,20 +857,28 @@ def labels_import_print(token: str, printer: str = Form("")) -> JSONResponse:
     target = _resolve_target(printer)
     ok, reason = printers.preflight(target)
     if not ok:
+        log.warning("Importación %s: impresora «%s» no lista: %s", token, target, reason)
         raise HTTPException(status_code=409, detail=f"Impresora no lista: {reason}")
     batch = uuid.uuid4().hex[:10]
+    log.info("Importación %s: imprimiendo %d guía(s) (%s) en «%s»…",
+             token, len(imp["meta"]), imp["provider"], target)
     try:
         job = printers.print_bytes(target, imp["pdf"], raw=False,
                                    title=f"import_{imp['provider']}_{token}")
     except printers.PrinterError as exc:
         _history_pdf_import(imp, batch, target, "error", str(exc))
+        log.error("Importación %s: la impresora «%s» falló al recibir: %s",
+                  token, target, exc, exc_info=True)
         raise HTTPException(status_code=502, detail=str(exc))
     result, why = printers.wait_for_job(target, job)
     status = "ok" if result == "completed" else "risk"
     _history_pdf_import(imp, batch, target, status, why)
     if status == "ok":
+        log.info("Importación %s impresa y confirmada (job %s)", token, job)
         return JSONResponse({"ok": True, "printer": target, "job": job,
                              "guides": len(imp["meta"])})
+    log.error("Importación %s EN RIESGO — enviada sin confirmar (job %s): %s",
+              token, job, why)
     raise HTTPException(status_code=502, detail=(
         f"Se envió pero no se confirmó la impresión: {why} Revisa el Historial."))
 
@@ -800,6 +894,36 @@ def _history_pdf_import(imp: dict, batch: str, printer_name: str,
             "pdf", status=status, order_id=m.get("order_id"),
             product_summary=summary or None, printer=printer_name,
             error=error, account=account)
+
+
+# --- Logs del servidor (pestaña Logs) ----------------------------------------
+@app.get("/api/logs")
+def logs_view(hours: float = 24, level: str = "info", module: str = "",
+              q: str = "", limit: int = 300) -> JSONResponse:
+    """Lectura del log para la interfaz: últimas 24 h por defecto; para ver
+    más se filtra (rango mayor, nivel, módulo o texto)."""
+    return JSONResponse(logutil.read_entries(
+        hours=max(0.0, hours), min_level=level, logger_name=module.strip(),
+        query=q, limit=max(1, min(limit, 1000))))
+
+
+_CLIENT_LEVELS = {"OK": "info", "INFO": "info", "WARN": "warning",
+                  "WARNING": "warning", "ERROR": "error"}
+
+
+@app.post("/api/logs/client")
+def logs_client(level: str = Form("INFO"), module: str = Form("web"),
+                message: str = Form(...)) -> JSONResponse:
+    """Eventos de la interfaz (navegador) hacia el mismo log del servidor.
+
+    Cada módulo de la interfaz es su propio logger ('web.cola',
+    'web.impresion'…) para poder filtrarlos por separado en la pestaña Logs.
+    """
+    lvl = _CLIENT_LEVELS.get(level.strip().upper(), "info")
+    mod = "".join(c for c in module.strip().lower() if c.isalnum() or c in "_-")[:20]
+    logger = logutil.get_logger("web." + mod if mod else "web")
+    getattr(logger, lvl)("%s", message[:500])
+    return JSONResponse({"ok": True})
 
 
 # --- Historial de impresión --------------------------------------------------

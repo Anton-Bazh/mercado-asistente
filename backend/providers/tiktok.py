@@ -23,12 +23,15 @@ from urllib.parse import urlencode
 
 import httpx
 
+import logutil
 import storage
 from config import (
     TIKTOK_AUTHORIZE_URL, TIKTOK_TOKEN_URL, TIKTOK_REFRESH_URL,
     TIKTOK_API_BASE, TIKTOK_API_VERSION, HTTP_TIMEOUT, TOKEN_REFRESH_MARGIN,
 )
 from providers.base import Provider, ProviderError
+
+log = logutil.get_logger("tiktok")
 
 # Códigos de la API que indican token inválido/expirado (reintento con refresh).
 _TOKEN_ERRORS = {105000, 105001, 105002, 105003, 105004}
@@ -60,6 +63,7 @@ class TikTokProvider(Provider):
             "refresh_token": account["refresh_token"], "grant_type": "refresh_token",
         })
         self._store(account, data)
+        log.info("%s token renovado.", logutil.account_ctx(account))
         return account["access_token"]
 
     def _auth_request(self, url: str, params: dict) -> dict:
@@ -142,10 +146,14 @@ class TikTokProvider(Provider):
             raise ProviderError(f"TikTok Shop devolvió {resp.status_code}: {resp.text[:200]}")
         code = payload.get("code")
         if code in _TOKEN_ERRORS and _retry:
+            log.debug("%s token inválido (código %s) en %s; renovando y "
+                      "reintentando…", logutil.account_ctx(account), code, path)
             self.refresh(account)
             return self._call(account, method, path, query=query, body=body,
                               shop=shop, _retry=False)
         if code != 0:
+            log.debug("%s %s %s → código %s: %s", logutil.account_ctx(account),
+                      method, path, code, resp.text[:500])
             raise ProviderError(f"TikTok Shop ({code}): {payload.get('message') or resp.text[:150]}")
         return payload.get("data") or {}
 

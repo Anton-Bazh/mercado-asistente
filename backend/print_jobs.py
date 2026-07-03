@@ -19,10 +19,13 @@ import time
 import uuid
 
 import label_layout
+import logutil
 import orders_hub
 import printers
 import storage
 from providers.base import ProviderError
+
+log = logutil.get_logger("lotes")
 
 # Estados por envío que ve la interfaz.
 #   pending  = en espera
@@ -55,6 +58,7 @@ def _snapshot() -> dict:
         "job_id": _job["id"],
         "printer": _job["printer"],
         "format": _job["format"],
+        "origin": _job.get("origin", "manual"),
         "total": len(_job["items"]),
         "counts": counts,
         "current_sheet": _job["current_sheet"],
@@ -83,8 +87,11 @@ def stop() -> bool:
     return True
 
 
-def start(items: list[dict], fmt: str, printer: str) -> str:
-    """Arranca un lote en segundo plano. Devuelve el job_id."""
+def start(items: list[dict], fmt: str, printer: str, origin: str = "manual") -> str:
+    """Arranca un lote en segundo plano. Devuelve el job_id.
+
+    origin: 'manual' (persona) o 'auto' (scheduler por reglas de horario).
+    """
     global _job, _thread
     with _lock:
         if _job is not None and _job["running"]:
@@ -94,6 +101,7 @@ def start(items: list[dict], fmt: str, printer: str) -> str:
             "id": job_id,
             "printer": printer,
             "format": fmt,
+            "origin": origin,
             "items": [
                 {
                     "shipment_id": str(it["shipment_id"]),
@@ -113,13 +121,35 @@ def start(items: list[dict], fmt: str, printer: str) -> str:
             "started": int(time.time()),
             "finished_at": None,
         }
+    by_account: dict[str, int] = {}
+    for it in items:
+        key = str(it.get("account_name") or "¿sin tienda?")
+        by_account[key] = by_account.get(key, 0) + 1
+    log.info("Lote %s iniciado: %d etiqueta(s) (%s) → «%s», origen %s · %s",
+             job_id, len(items), fmt, printer, origin,
+             ", ".join(f"{n}: {c}" for n, c in sorted(by_account.items())))
     _stop.clear()
-    _thread = threading.Thread(target=_run, args=(job_id, fmt, printer), daemon=True)
+    _thread = threading.Thread(target=_run_safe, args=(job_id, fmt, printer),
+                               daemon=True, name=f"lote-{job_id}")
     _thread.start()
     return job_id
 
 
 # --- Ejecución ---------------------------------------------------------------
+def _run_safe(job_id: str, fmt: str, printer: str) -> None:
+    """Aísla el hilo del lote: un fallo inesperado se loguea y cierra el lote
+    (sin esto quedaría 'imprimiendo' para siempre y sin rastro)."""
+    try:
+        _run(job_id, fmt, printer)
+    except Exception:
+        log.exception("Lote %s: fallo inesperado del motor de lotes", job_id)
+        with _lock:
+            if _job is not None and _job["id"] == job_id:
+                _job["running"] = False
+                _job["finished_at"] = int(time.time())
+                _job["message"] = "Fallo inesperado del lote; revisa el log del servidor."
+
+
 def _set(item: dict, status_val: str) -> None:
     with _lock:
         item["status"] = status_val
@@ -140,6 +170,7 @@ def _record(item: dict, fmt: str, status_val: str, printer: str,
         product_summary=item.get("product_summary"),
         printer=printer, sheets=sheets, error=error,
         account=item.get("account_name"),
+        origin=_job.get("origin", "manual") if _job else "manual",
     )
 
 
@@ -164,6 +195,9 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
                 _set(it, "risk"); _record(it, fmt, "risk", printer, None,
                                           "La impresora no se liberó a tiempo.")
             _msg("La impresora no se liberó; se detuvo el lote.")
+            log.error("Lote %s: «%s» no se liberó en 180 s — %d etiqueta(s) EN "
+                      "RIESGO: %s", job_id, printer, len(b_items),
+                      ", ".join(it["shipment_id"] for it in b_items))
             return False
 
         # Verificar justo antes de mandar la hoja.
@@ -173,6 +207,9 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
                 _set(it, "risk"); _record(it, fmt, "risk", printer, None,
                                           f"Impresora no lista al imprimir: {reason}")
             _msg(f"La impresora dejó de estar lista: {reason}")
+            log.error("Lote %s: «%s» dejó de estar lista (%s) — %d etiqueta(s) EN "
+                      "RIESGO: %s", job_id, printer, reason, len(b_items),
+                      ", ".join(it["shipment_id"] for it in b_items))
             return False
 
         # Empaquetar la hoja (n-up en PDF; ZPL crudo concatenado).
@@ -191,6 +228,9 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
             for it in b_items:
                 _set(it, "risk"); _record(it, fmt, "risk", printer, sheets, str(exc))
             _msg(f"Fallo al enviar la hoja: {exc}")
+            log.critical("Lote %s: fallo al enviar la hoja %d a «%s»: %s — %d "
+                         "etiqueta(s) EN RIESGO", job_id, _job["current_sheet"],
+                         printer, exc, len(b_items), exc_info=True)
             return False
 
         result, why = printers.wait_for_job(printer, job)
@@ -199,11 +239,17 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
                 _set(it, "done"); _record(it, fmt, "ok", printer, sheets, None)
             with _lock:
                 _job["sheets_done"] += 1
+            log.info("Lote %s: hoja %d confirmada (%d etiqueta(s), job CUPS %s)",
+                     job_id, _job["current_sheet"], len(b_items), job)
             return True
         # Falló / timeout: ya pedidas a ML, sin confirmar → riesgo.
         for it in b_items:
             _set(it, "risk"); _record(it, fmt, "risk", printer, sheets, why)
         _msg(f"La hoja no se confirmó: {why}")
+        log.error("Lote %s: hoja %d NO confirmada (job CUPS %s): %s — %d "
+                  "etiqueta(s) EN RIESGO: %s", job_id, _job["current_sheet"],
+                  job, why, len(b_items),
+                  ", ".join(it["shipment_id"] for it in b_items))
         return False
 
     stopped = False
@@ -221,6 +267,10 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
                 _record(rest, fmt, "blocked", printer, None,
                         f"No se pidió a ML: {reason}")
             _msg(f"Bloqueado para no perder etiquetas: {reason}")
+            log.warning("Lote %s: bloqueado en la etiqueta %d/%d — «%s» no lista "
+                        "(%s); %d etiqueta(s) siguen pendientes a salvo",
+                        job_id, idx + 1, len(items), printer, reason,
+                        len(items) - idx)
             with _lock:
                 _job["running"] = False
                 _job["finished_at"] = int(time.time())
@@ -239,6 +289,11 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
                 _set(rest, "blocked")
                 _record(rest, fmt, "blocked", printer, None, "Detenido tras error de ML.")
             _msg(f"Error al pedir la etiqueta a Mercado Libre: {exc}")
+            log.error("Lote %s: %s error al pedir la etiqueta del envío %s: %s — "
+                      "lote detenido, %d etiqueta(s) bloqueadas a salvo",
+                      job_id,
+                      logutil.ctx(None, item.get("account_name")),
+                      item["shipment_id"], exc, len(items) - idx)
             with _lock:
                 _job["running"] = False
                 _job["finished_at"] = int(time.time())
@@ -267,10 +322,14 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
 
     # Marcar como cancelados los que no se llegaron a tocar.
     if stopped:
+        canceled = 0
         for it in items:
             if it["status"] == "pending":
                 _set(it, "canceled")
+                canceled += 1
         _msg("Lote detenido por el operador.")
+        log.info("Lote %s detenido por el operador (%d etiqueta(s) canceladas "
+                 "sin pedir).", job_id, canceled)
     else:
         with _lock:
             done = sum(1 for it in items if it["status"] == "done")
@@ -279,6 +338,13 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
         if risk:
             parts.append(f"{risk} en riesgo (revisar)")
         _msg("Lote terminado: " + ", ".join(parts) + ".")
+        summary = ("Lote %s terminado: %d impresa(s), %d en riesgo, "
+                   "%d hoja(s), %.0f s")
+        elapsed = time.time() - _job["started"]
+        if risk:
+            log.warning(summary, job_id, done, risk, _job["sheets_done"], elapsed)
+        else:
+            log.info(summary, job_id, done, risk, _job["sheets_done"], elapsed)
 
     with _lock:
         _job["running"] = False

@@ -18,6 +18,7 @@ import time
 from datetime import datetime
 
 import label_layout
+import logutil
 import orders_hub
 import print_jobs
 import printers
@@ -25,6 +26,13 @@ import rules
 import storage
 from config import DEFAULT_LABEL_W_PT, DEFAULT_LABEL_H_PT
 from providers.base import ProviderError
+
+log = logutil.get_logger("auto")
+
+# Estados que ameritan aviso (WARNING) cuando el automático quiere imprimir
+# pero no puede; el resto de transiciones se loguean como INFO/DEBUG.
+_WARN_STATES = {"error", "printer_not_ready", "no_printer", "no_size", "no_conn"}
+_QUIET_STATES = {"waiting_interval", "idle_ok", "off", "paused", "waiting_fill"}
 
 _lock = threading.Lock()
 _started = False
@@ -91,8 +99,17 @@ def status() -> dict:
 
 def _set(state: str, message: str) -> None:
     with _lock:
+        changed = _status["state"] != state
         _status["state"] = state
         _status["message"] = message
+    # Solo transiciones (el ciclo repite el mismo estado cada pocos segundos).
+    if changed:
+        if state in _WARN_STATES:
+            log.warning("%s → %s", state, message)
+        elif state in _QUIET_STATES:
+            log.debug("%s → %s", state, message)
+        else:
+            log.info("%s → %s", state, message)
 
 
 # --- Utilidades --------------------------------------------------------------
@@ -197,7 +214,7 @@ def _tick() -> None:
         for r in selected
     ]
     try:
-        print_jobs.start(items, "pdf", target)
+        print_jobs.start(items, "pdf", target, origin="auto")
         with _lock:
             _status["last_run"] = int(now_ts)
         sheets = -(-len(items) // per)   # techo
@@ -221,7 +238,9 @@ def start_scheduler(interval: float = 30.0) -> None:
             try:
                 _tick()
             except Exception:
-                pass
+                log.exception("Fallo inesperado en el ciclo del modo automático "
+                              "(el hilo sigue vivo).")
             time.sleep(interval)
 
-    threading.Thread(target=_loop, daemon=True).start()
+    threading.Thread(target=_loop, daemon=True, name="auto").start()
+    log.debug("Hilo del modo automático arrancado (revisión cada %.0f s).", interval)

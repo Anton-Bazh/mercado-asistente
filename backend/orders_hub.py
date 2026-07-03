@@ -7,9 +7,17 @@ cola. Aísla errores: si una cuenta falla, las demás siguen.
 from __future__ import annotations
 
 import label_stub
+import logutil
 import storage
 from providers.registry import get_provider
 from providers.base import ProviderError
+
+log = logutil.get_logger("tiendas")
+
+# Último error visto por cuenta: el frontend sondea la cola cada pocos
+# segundos, así que solo se loguea a WARNING cuando el error cambia (o cuando
+# la cuenta se recupera); las repeticiones van a DEBUG (quedan en el archivo).
+_LAST_ERR: dict[str, str] = {}
 
 # Datos del pedido por envío, para armar el talón de control al momento de
 # pedir la etiqueta (get_label solo recibe el shipment_id). Se alimenta en
@@ -59,11 +67,21 @@ def list_all_pending() -> dict:
     for acc in connected_accounts():
         name = acc.get("name") or acc.get("nickname") or "Tienda"
         accounts_meta.append({"id": acc["id"], "name": name, "provider": acc.get("provider")})
+        lctx = logutil.account_ctx(acc)
         try:
             rows = get_provider(acc["provider"]).list_ready(acc)
         except ProviderError as exc:
             errors.append({"account_id": acc["id"], "account_name": name, "error": str(exc)})
+            if _LAST_ERR.get(acc["id"]) != str(exc):
+                _LAST_ERR[acc["id"]] = str(exc)
+                log.warning("%s no se pudieron leer los pedidos: %s", lctx, exc)
+            else:
+                log.debug("%s sigue fallando la lectura de pedidos: %s", lctx, exc)
             continue
+        if acc["id"] in _LAST_ERR:
+            del _LAST_ERR[acc["id"]]
+            log.info("%s se recuperó: pedidos leídos de nuevo con éxito.", lctx)
+        log.debug("%s cola leída: %d pedido(s) listos para enviar.", lctx, len(rows))
         for r in rows:
             r["account_id"] = acc["id"]
             r["account_name"] = name
@@ -86,7 +104,11 @@ def list_all_pending() -> dict:
 def get_label(account_id: str, shipment_id: str, fmt: str = "pdf"):
     acc = storage.get_account(account_id)
     if not acc:
+        log.error("Se pidió la etiqueta del envío %s de una cuenta inexistente (%s).",
+                  shipment_id, account_id)
         raise ProviderError("Cuenta no encontrada para el envío.")
+    log.debug("%s pidiendo etiqueta del envío %s (%s)…",
+              logutil.account_ctx(acc), shipment_id, fmt)
     content, ctype, fname = get_provider(acc["provider"]).get_label(acc, shipment_id, fmt)
     # Talón de control de producto (Walmart/TikTok): solo PDF, y nunca debe
     # bloquear la impresión si algo falla al dibujarlo.
@@ -99,15 +121,19 @@ def get_label(account_id: str, shipment_id: str, fmt: str = "pdf"):
             try:
                 for r in get_provider(acc["provider"]).list_ready(acc):
                     _remember_order(r)
-            except ProviderError:
-                pass
+            except ProviderError as exc:
+                log.debug("%s no se pudo reconsultar el pedido del envío %s "
+                          "para el talón: %s", logutil.account_ctx(acc),
+                          shipment_id, exc)
             info = _ORDER_INFO.get(str(shipment_id))
         if info and info.get("products"):
             try:
                 content = label_stub.add_stub(content, info["products"],
                                               order_ref=str(info.get("order_id") or ""))
             except Exception:
-                pass
+                log.warning("%s no se pudo dibujar el talón de control del envío "
+                            "%s (la etiqueta sale sin talón).",
+                            logutil.account_ctx(acc), shipment_id, exc_info=True)
     return content, ctype, fname
 
 
