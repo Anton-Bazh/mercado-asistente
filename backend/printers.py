@@ -17,6 +17,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 import logutil
 from config import STAMP_PATH
@@ -174,6 +175,67 @@ def _is_shared(uri: str) -> bool:
     return False
 
 
+# Colas compartidas (dnssd): device-uri mDNS → URI ipp:// real, cacheada.
+# Se invalida si el sondeo falla, para re-resolver al siguiente ciclo (el
+# servidor pudo cambiar de IP o dejar de publicar la cola).
+_shared_targets: dict[str, str] = {}
+
+
+def _resolve_shared_uri(uri: str) -> str:
+    """Resuelve el device-uri mDNS de una cola compartida a su URI ipp:// real.
+
+    dnssd://Brother_DCP_T220_USB%20%40%20mtmdelta._ipp._tcp.local/cups?uuid=…
+    → ipp://mtmdelta.local:631/printers/Brother_DCP_T220_USB (vía ippfind).
+    """
+    cached = _shared_targets.get(uri)
+    if cached is not None:
+        return cached
+    m = re.match(r"^dnssd://([^/?]+)", uri or "", re.I)
+    if not m:
+        return ""
+    service = unquote(m.group(1))
+    if not service.endswith("."):
+        service += "."
+    try:
+        cp = _run(["ippfind", service, "-T", "4"])
+    except PrinterError:
+        return ""
+    lines = (cp.stdout or b"").decode(errors="replace").strip().splitlines()
+    resolved = lines[0].strip() if cp.returncode == 0 and lines else ""
+    if resolved:
+        _shared_targets[uri] = resolved
+    return resolved
+
+
+def _probe_shared_queue(target: str) -> tuple[bool, str]:
+    """Pregunta al servidor CUPS remoto si la cola compartida puede imprimir AHORA."""
+    m = re.match(r"^ipps?://([^/:]+)(?::(\d+))?", target, re.I)
+    if not m:
+        return False, "Compartida: se comprueba al imprimir (depende de otro equipo)"
+    host, port = m.group(1), int(m.group(2) or 631)
+    try:
+        with socket.create_connection((host, port), timeout=3):
+            pass
+    except OSError:
+        return False, f"El servidor de impresión no responde ({host}:{port})."
+    cp = _run(["ipptool", "-T", "5", "-tv", target, _IPPTOOL_TEST])
+    out = (cp.stdout or b"").decode(errors="replace")
+
+    def _attr(name: str) -> str:
+        m2 = re.search(rf"^\s*{name} \([^)]*\) = ?(.*)$", out, re.M)
+        return m2.group(1).strip().lower() if m2 else ""
+
+    state = _attr("printer-state")
+    if not state:
+        return False, "El servidor no respondió por IPP (cola compartida)."
+    if _attr("printer-is-accepting-jobs") == "false":
+        return False, "El servidor no acepta trabajos para esta cola."
+    reasons = _attr("printer-state-reasons")
+    if state in ("stopped", "5") or any(k in reasons for k in _BAD_REASONS):
+        return False, f"El servidor reporta la cola no disponible ({reasons or state})."
+    return True, ""
+
+
 def _accepting_map() -> dict[str, bool]:
     out: dict[str, bool] = {}
     for line in _text(["lpstat", "-a"]).splitlines():
@@ -231,7 +293,8 @@ def _compute_readiness(name: str, uri: str, accepting: bool) -> dict:
     Señales reales, no lo que CUPS "cree":
       - USB → debe estar conectada (lsusb).
       - Red directa (IP) → sonda TCP.
-      - Compartida (mDNS/otro equipo) → no se puede confirmar en frío.
+      - Compartida (mDNS/otro equipo) → se resuelve el servidor por mDNS y se
+        le pregunta por IPP el estado real de la cola.
       - En cualquier caso, el mensaje IPP delata «offline»/«waiting».
     """
     shared = _is_shared(uri)
@@ -254,8 +317,14 @@ def _compute_readiness(name: str, uri: str, accepting: bool) -> dict:
         if not _usb_present(uri):
             return {**base, "ready": False, "reason": "Apagada o desconectada (USB)"}
         return {**base, "ready": True, "reason": ""}
-    # Compartida (otro equipo): no se puede confirmar en frío.
+    # Compartida (otro equipo): confirmar contra el servidor CUPS que la publica.
     if shared:
+        target = _resolve_shared_uri(uri)
+        if target:
+            ok, why = _probe_shared_queue(target)
+            if not ok:
+                _shared_targets.pop(uri, None)   # re-resolver al siguiente ciclo
+            return {**base, "ready": ok, "reason": why}
         return {**base, "ready": False,
                 "reason": "Compartida: se comprueba al imprimir (depende de otro equipo)"}
     # Red directa por IP: sonda TCP real.
