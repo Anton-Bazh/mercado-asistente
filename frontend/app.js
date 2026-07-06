@@ -4,8 +4,9 @@
 // ===== Estado =====
 const state = {
   tab: 'cola',
-  orders: [],            // ventas ready_to_ship (API), cada una con .pending
-  selected: new Set(),   // shipment_id elegidos manualmente para "A imprimir"
+  orders: [],            // ventas ready_to_ship (API), cada una con .pending y .due
+  selected: new Set(),   // shipment_id marcados para el lote (dentro de "A imprimir")
+  advanced: new Set(),   // shipment_id de "Próximos" adelantados manualmente a hoy
   printedToday: 0,       // contador de impresiones exitosas de hoy (backend)
   doneRecent: [],        // mini-historial reciente (columna Impresos)
   status: { configured: false, connected: false, site: '—', nickname: null,
@@ -24,6 +25,7 @@ const state = {
   accountsMeta: [],      // tiendas presentes en la cola (para el filtro)
   ordersErrors: [],      // tiendas que fallaron al leer
   storeFilter: 'all',    // filtro de tienda en la Cola
+  searchQ: '',           // buscador de etiquetas de la Cola
   accounts: [],          // cuentas configuradas (pestaña Cuentas)
   providers: [],         // catálogo de proveedores
   lastSync: null,
@@ -36,7 +38,7 @@ const state = {
 };
 
 const TITLES = {
-  cola: ['Cola en tiempo real', 'Elige impresora y formato arriba; imprime seleccionadas o todo lo pendiente'],
+  cola: ['Cola en tiempo real', 'Las columnas siguen la fecha límite de Mercado Libre: hoy en «A imprimir», los siguientes días en «Próximos»'],
   separacion: ['Separación', 'Pedidos multi-unidad para gestión manual (separar o imprimir)'],
   automatico: ['Impresión automática', 'El servidor imprime solo, según las reglas de la semana'],
   dispositivos: ['Dispositivos', 'Destino de impresión disponible'],
@@ -73,13 +75,49 @@ function showBanner(msg, type = 'info') {
 }
 // Filtro por tienda (Cola). 'all' = todas.
 function inStore(o) { return state.storeFilter === 'all' || String(o.account_id) === String(state.storeFilter); }
+// ===== Buscador de etiquetas (Cola) =====
+// Busca sin acentos ni mayúsculas; varias palabras = todas deben coincidir.
+function deacc(s) {
+  return String(s == null ? '' : s).toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+function textMatches(haystack) {
+  const words = deacc(state.searchQ).split(/\s+/).filter(Boolean);
+  return words.every(w => haystack.includes(w));
+}
+// Campos por tienda: ML (venta, envío, pack, cliente, dirección, SKU),
+// Walmart (además PO de la guía FedEx y tracking), TikTok (pedido, package id).
+function matchesSearch(o) {
+  if (!state.searchQ) return true;
+  const parts = [o.order_id, o.shipment_id, o.pack_id, o.po, o.buyer_name,
+                 o.address, o.account_name, o.total_amount];
+  for (const p of (o.products || [])) parts.push(p.title, p.sku);
+  return textMatches(deacc(parts.filter(v => v != null && v !== '').join(' ')));
+}
+function doneMatchesSearch(h) {
+  if (!state.searchQ) return true;
+  const parts = [h.shipment_id, h.order_id, h.buyer_name, h.product_summary, h.account];
+  return textMatches(deacc(parts.filter(v => v != null && v !== '').join(' ')));
+}
 // Pool de pendientes por imprimir (excluye multi-unidad → van a Separación).
-function pendingPool() { return state.orders.filter(o => o.pending && !o.multi_unit && inStore(o)); }
+function pendingPool() { return state.orders.filter(o => o.pending && !o.multi_unit && inStore(o) && matchesSearch(o)); }
 // Multi-unidad pendientes: gestión manual (separar/imprimir) en «Separación».
 function manualList() { return state.orders.filter(o => o.pending && o.multi_unit); }
-// Próximos = pendientes aún no seleccionados; A imprimir = pendientes seleccionados.
-function nextList() { return pendingPool().filter(o => !state.selected.has(String(o.shipment_id))); }
-function selectedList() { return pendingPool().filter(o => state.selected.has(String(o.shipment_id))); }
+// Las columnas siguen el dato de ML (row.due, por fecha límite de despacho):
+// A imprimir = hoy/vencidas (+ adelantadas a mano); Próximos = siguientes días.
+function isForToday(o) { return o.due !== 'upcoming' || state.advanced.has(String(o.shipment_id)); }
+function nextList() {
+  return pendingPool().filter(o => !isForToday(o))
+    .sort((a, b) => String(a.handling_limit || '').localeCompare(String(b.handling_limit || '')));
+}
+function todayList() {
+  const rank = { overdue: 0, today: 1 };
+  return pendingPool().filter(isForToday)
+    .sort((a, b) => (rank[a.due] ?? 1) - (rank[b.due] ?? 1));
+}
+function selectedList() { return todayList().filter(o => state.selected.has(String(o.shipment_id))); }
+// Pools sin filtro de tienda, para los contadores por cuenta de cada columna.
+function poolAllStores() { return state.orders.filter(o => o.pending && !o.multi_unit); }
 function productSummary(o) {
   const p = (o.products && o.products[0]) || null;
   if (!p) return '—';
@@ -263,7 +301,10 @@ function canServerPrint() { return state.printers.length > 0; }
 // Refresca lo que depende del backend tras imprimir: cola (para que 'pending'
 // se actualice) y el mini-historial de la columna Impresos.
 async function afterPrint(printedOrders) {
-  for (const o of printedOrders) state.selected.delete(String(o.shipment_id));
+  for (const o of printedOrders) {
+    state.selected.delete(String(o.shipment_id));
+    state.advanced.delete(String(o.shipment_id));
+  }
   await Promise.all([loadOrders(), loadDoneRecent()]);
   renderCola();
 }
@@ -325,10 +366,11 @@ function printSelected() {
   if (!sel.length) { showBanner('No hay ventas seleccionadas.', 'info'); return; }
   startBatch(sel, 'Selección');
 }
-function printAllPending() {
-  const q = pendingPool();
-  if (!q.length) { showBanner('No hay pendientes por imprimir.', 'info'); return; }
-  startBatch(q, 'Todo lo pendiente');
+// Imprime lo que ML marca para hoy (columna «A imprimir»); los Próximos no entran.
+function printAllToday() {
+  const q = todayList();
+  if (!q.length) { showBanner('No hay etiquetas para hoy.', 'info'); return; }
+  startBatch(q, 'Todo lo de hoy');
 }
 // ===== Progreso del lote (motor en segundo plano) =====
 const BATCH_ITEM_STYLE = {
@@ -428,8 +470,21 @@ function timeAgo(iso) {
   if (m < 48 * 60) return `hace ${Math.floor(m / 60)} h`;
   return `hace ${Math.floor(m / 1440)} días`;
 }
+// Etiqueta de fecha límite de despacho (dato de ML): cuándo toca imprimirla.
+function dueTag(o) {
+  if (o.due === 'overdue')
+    return '<span class="qtag" style="background:#fbe9e9;color:#c43232">vencida</span>';
+  if (o.due === 'upcoming' && o.handling_limit) {
+    const d = new Date(o.handling_limit);
+    if (!isNaN(d.getTime()))
+      return `<span class="qtag" style="background:#fbf2dd;color:#7a5b00">para ${esc(d.toLocaleDateString('es-MX', { weekday:'short', day:'2-digit', month:'short' }))}</span>`;
+  }
+  return '';
+}
 function qTags(o) {
   const tags = [];
+  const due = dueTag(o);
+  if (due) tags.push(due);
   if (o.account_name && state.accountsMeta.length > 1)
     tags.push(`<span class="qtag"><i></i>${esc(o.account_name)}</span>`);
   if (stubActive(o.provider, o.account_id)) tags.push('<span class="qtag stub">✂ talón</span>');
@@ -447,17 +502,29 @@ function colaItemHtml(o, kind) {
       ${qTags(o)}
     </div>`;
   if (kind === 'next') {
-    return `<div class="q-item mk" style="cursor:pointer;--mkc:${mkColor(o.provider)}" title="Marcar para imprimir" data-sid="${esc(sid)}" data-act="add">
-      <span class="chk" style="margin-top:2px"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" style="visibility:hidden"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+    // Próximos: informativa (la fecha la pone ML); solo permite adelantarla.
+    return `<div class="q-item mk" style="--mkc:${mkColor(o.provider)}" data-sid="${esc(sid)}">
       ${body}
+      <button class="xbtn" title="Adelantar a «A imprimir»" data-sid="${esc(sid)}" data-act="advance" style="color:var(--accent);align-self:center;font-size:14px">→</button>
     </div>`;
   }
-  // seleccionadas
-  return `<div class="q-item mk" style="--mkc:${mkColor(o.provider)}" data-sid="${esc(sid)}">
-    <span class="chk on" style="margin-top:2px"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+  // A imprimir (hoy): la casilla arma el lote; la tarjeta no cambia de columna.
+  const on = state.selected.has(sid);
+  const adv = state.advanced.has(sid);
+  return `<div class="q-item mk" style="cursor:pointer;--mkc:${mkColor(o.provider)}" title="${on ? 'Quitar del lote' : 'Marcar para el lote'}" data-sid="${esc(sid)}" data-act="toggle">
+    <span class="chk${on ? ' on' : ''}" style="margin-top:2px"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" style="visibility:${on ? 'visible' : 'hidden'}"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
     ${body}
-    <button class="xbtn" title="Quitar de la selección" data-sid="${esc(sid)}" data-act="remove" style="align-self:center">✕</button>
+    ${adv ? `<button class="xbtn" title="Devolver a «Próximos»" data-sid="${esc(sid)}" data-act="unadvance" style="align-self:center">✕</button>` : ''}
   </div>`;
+}
+// Contadores por cuenta para la cabecera de cada columna (solo si hay >1 tienda).
+function storeCountChips(list) {
+  const metas = state.accountsMeta || [];
+  if (metas.length < 2) return '';
+  return metas.map(a => {
+    const n = list.filter(o => String(o.account_id) === String(a.id)).length;
+    return `<span class="mkchip"><i style="background:${mkColor(a.provider)}"></i>${esc(a.name)} <b>${n}</b></span>`;
+  }).join('');
 }
 function renderStoreChips() {
   const box = $('store-chips'); if (!box) return;
@@ -541,17 +608,20 @@ function doneItemHtml(h) {
 function renderCola() {
   const pend = pendingPool();
   const next = nextList();
+  const hoy = todayList();
   const sel = selectedList();
-  // limpia selección de ids que ya no están pendientes/presentes
+  // limpia selección/adelantos de ids que ya no están pendientes/presentes
   const present = new Set(pend.map(o => String(o.shipment_id)));
   for (const id of [...state.selected]) if (!present.has(id)) state.selected.delete(id);
+  for (const id of [...state.advanced]) if (!present.has(id)) state.advanced.delete(id);
 
   $('nav-queue-count').textContent = pend.length;
   const mlist = manualList();
   const mbadge = $('nav-manual-count');
   if (mbadge) { mbadge.textContent = mlist.length; mbadge.style.display = mlist.length ? 'inline-block' : 'none'; }
   $('kpi-pendientes').textContent = pend.length;
-  $('kpi-encola').textContent = sel.length;
+  $('kpi-encola').textContent = hoy.length;
+  $('kpi-encola-break').innerHTML = sel.length ? `<span class="mkchip">${sel.length} en el lote</span>` : '';
   $('kpi-hoy').textContent = state.printedToday;
   // desglose de pendientes por marketplace (solo si hay más de uno)
   const provCount = {};
@@ -565,30 +635,55 @@ function renderCola() {
   $('kpi-hoy-break').innerHTML = (sp && sp.total > 0 && sp.auto > 0)
     ? `<span class="mkchip">${sp.auto} automático</span><span class="mkchip">${sp.manual} manual</span>` : '';
   renderAutoKpi();
-  $('print-pending-count').textContent = pend.length;
+  $('print-pending-count').textContent = hoy.length;
   $('print-sel-count').textContent = sel.length;
   $('col-next-count').textContent = next.length;
-  $('col-sel-count').textContent = sel.length;
+  $('col-sel-count').textContent = hoy.length;
   $('col-done-count').textContent = state.printedToday;
-  $('btn-print-pending').disabled = !pend.length;
+  $('btn-print-pending').disabled = !hoy.length;
   $('btn-print-selected').disabled = !sel.length;
-  $('btn-select-all').disabled = !next.length;
+  $('btn-select-all').disabled = !hoy.length;
 
-  // Próximos
+  // contadores por cuenta (dato de ML, sin filtro de tienda)
+  const allPool = poolAllStores();
+  const nextStores = $('col-next-stores'), selStores = $('col-sel-stores');
+  if (nextStores) {
+    const html = storeCountChips(allPool.filter(o => !isForToday(o)));
+    nextStores.innerHTML = html; nextStores.style.display = html ? 'flex' : 'none';
+  }
+  if (selStores) {
+    const html = storeCountChips(allPool.filter(isForToday));
+    selStores.innerHTML = html; selStores.style.display = html ? 'flex' : 'none';
+  }
+
+  // Próximos (siguientes días según ML)
+  const buscando = !!state.searchQ;
   const cNext = $('col-next');
   if (!state.status.connected) cNext.innerHTML = idle('Conecta tu cuenta para ver las ventas.');
-  else if (!next.length) cNext.innerHTML = idle(pend.length ? 'Todo lo pendiente está seleccionado.' : 'No hay ventas por imprimir.');
+  else if (!next.length) cNext.innerHTML = idle(buscando ? 'Sin coincidencias aquí.' : 'Nada programado para los siguientes días.');
   else cNext.innerHTML = next.map(o => colaItemHtml(o, 'next')).join('');
 
-  // A imprimir
+  // A imprimir (hoy según ML)
   const cSel = $('col-sel');
-  cSel.innerHTML = sel.length ? sel.map(o => colaItemHtml(o, 'sel')).join('')
-    : idle('Marca envíos en «Próximos» para armar un lote.');
+  cSel.innerHTML = hoy.length ? hoy.map(o => colaItemHtml(o, 'today')).join('')
+    : idle(buscando ? 'Sin coincidencias aquí.' : 'No hay etiquetas para hoy.');
 
-  // Impresos (mini-historial reciente)
+  // Impresos (mini-historial reciente, también filtrado por el buscador)
+  const doneShown = state.doneRecent.filter(doneMatchesSearch);
   const cDone = $('col-done');
-  cDone.innerHTML = state.doneRecent.length ? state.doneRecent.map(doneItemHtml).join('')
-    : idle('Aún no imprimes nada hoy.');
+  cDone.innerHTML = doneShown.length ? doneShown.map(doneItemHtml).join('')
+    : idle(buscando ? 'Sin coincidencias aquí.' : 'Aún no imprimes nada hoy.');
+
+  // resumen del buscador
+  const sc = $('q-search-count'), scl = $('q-search-clear');
+  if (sc) {
+    if (buscando) {
+      sc.textContent = `${next.length + hoy.length} en cola · ${doneShown.length} impresas`;
+      sc.style.display = 'inline'; if (scl) scl.style.display = 'inline-block';
+    } else {
+      sc.style.display = 'none'; if (scl) scl.style.display = 'none';
+    }
+  }
 
   renderFormatSeg();
   renderStoreChips();
@@ -610,7 +705,7 @@ function renderRiskAlert() {
 // Texto en vivo del acomodo: "N etiquetas → K por hoja → M hojas".
 async function updateLayoutHint() {
   const row = $('layout-hint-row'); if (!row) return;
-  const count = selectedList().length || pendingPool().length;
+  const count = selectedList().length || todayList().length;
   if (!count || state.format === 'zpl') { row.style.display = 'none'; return; }
   const key = count + ':' + state.format;
   if (updateLayoutHint._key === key) { row.style.display = 'flex'; return; }
@@ -1237,19 +1332,30 @@ function init() {
 
   // cola (kanban)
   $('btn-reload').addEventListener('click', () => loadOrders({ manual: true }));
-  $('btn-print-pending').addEventListener('click', printAllPending);
+  $('btn-print-pending').addEventListener('click', printAllToday);
   $('btn-print-selected').addEventListener('click', printSelected);
   $('btn-select-all').addEventListener('click', () => {
-    nextList().forEach(o => state.selected.add(String(o.shipment_id)));
+    todayList().forEach(o => state.selected.add(String(o.shipment_id)));
     renderCola();
   });
+  // Próximos: solo permite adelantar una etiqueta a «A imprimir»
   $('col-next').addEventListener('click', e => {
-    const row = e.target.closest('[data-act="add"]'); if (!row) return;
-    state.selected.add(row.dataset.sid); renderCola();
+    const b = e.target.closest('[data-act="advance"]'); if (!b) return;
+    state.advanced.add(b.dataset.sid); renderCola();
   });
+  // A imprimir: la tarjeta marca/desmarca el lote; ✕ devuelve una adelantada
   $('col-sel').addEventListener('click', e => {
-    const b = e.target.closest('[data-act="remove"]'); if (!b) return;
-    state.selected.delete(b.dataset.sid); renderCola();
+    const un = e.target.closest('[data-act="unadvance"]');
+    if (un) {
+      state.advanced.delete(un.dataset.sid);
+      state.selected.delete(un.dataset.sid);
+      renderCola(); return;
+    }
+    const row = e.target.closest('[data-act="toggle"]'); if (!row) return;
+    const sid = row.dataset.sid;
+    if (state.selected.has(sid)) state.selected.delete(sid);
+    else state.selected.add(sid);
+    renderCola();
   });
   $('link-history').addEventListener('click', () => go('historial'));
   // reimprimir desde la columna Impresos (⟳)
@@ -1263,6 +1369,19 @@ function init() {
   $('store-chips').addEventListener('click', e => {
     const b = e.target.closest('[data-store]'); if (!b) return;
     state.storeFilter = b.dataset.store; state.selected.clear(); renderCola();
+  });
+
+  // buscador de etiquetas (Cola): filtra las tres columnas mientras escribes
+  const qs = $('q-search');
+  qs.addEventListener('input', () => {
+    clearTimeout(qs._t);
+    qs._t = setTimeout(() => { state.searchQ = qs.value.trim(); renderCola(); }, 150);
+  });
+  qs.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { qs.value = ''; state.searchQ = ''; renderCola(); }
+  });
+  $('q-search-clear').addEventListener('click', () => {
+    qs.value = ''; state.searchQ = ''; renderCola(); qs.focus();
   });
   $('store-errors').addEventListener('click', e => {
     if (e.target.closest('[data-goto="conexion"]')) go('conexion');

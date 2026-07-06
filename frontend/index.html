@@ -183,6 +183,9 @@
   .kcol{display:flex;flex-direction:column;min-height:340px;max-height:600px;padding:16px 8px 12px}
   .kcol-head{display:flex;align-items:center;justify-content:space-between;padding:0 8px 12px;gap:8px}
   .kcol-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:3px;padding:0 6px;min-height:0}
+  /* las tarjetas nunca se encogen: con columna llena se hace scroll, no se solapan */
+  .kcol-list>.q-item{flex:0 0 auto}
+  .kcol-sub{display:flex;gap:5px;flex-wrap:wrap;padding:0 8px 10px}
   .kcount{font-family:var(--mono);font-size:11px;font-weight:600;padding:1px 8px;border-radius:20px;background:#eef0f3;color:#6a7280}
   .chk{width:18px;height:18px;border-radius:5px;border:2px solid #c4c9d2;flex:0 0 18px;display:flex;align-items:center;justify-content:center;cursor:pointer;background:#fff;color:#fff}
   .chk.on{background:var(--accent);border-color:var(--accent)}
@@ -279,7 +282,7 @@
         <div class="wrap" style="max-width:1180px">
           <div class="kpis">
             <div class="card card-13"><div class="kpi-label">Pendientes por imprimir</div><div class="kpi-row"><span class="kpi-num" id="kpi-pendientes">—</span><span class="kpi-tag" style="color:#c0a000">faltan</span></div><div class="kpi-break" id="kpi-pend-break"></div></div>
-            <div class="card card-13"><div class="kpi-label">Seleccionadas</div><div class="kpi-row"><span class="kpi-num" id="kpi-encola">—</span><span class="kpi-tag" style="color:var(--accent)">a imprimir</span></div><div class="kpi-break"><span class="mkchip">manual</span></div></div>
+            <div class="card card-13"><div class="kpi-label">A imprimir hoy</div><div class="kpi-row"><span class="kpi-num" id="kpi-encola">—</span><span class="kpi-tag" style="color:var(--accent)">según ML</span></div><div class="kpi-break" id="kpi-encola-break"></div></div>
             <div class="card card-13"><div class="kpi-label">Impresas hoy</div><div class="kpi-row"><span class="kpi-num" id="kpi-hoy" style="color:#15a05a">0</span><span class="kpi-tag" style="color:#15a05a">✓</span></div><div class="kpi-break" id="kpi-hoy-break"></div></div>
             <div class="card card-13" id="kpi-auto-card"><div class="kpi-label">Automático</div><div class="kpi-row"><span class="kpi-num" id="kpi-auto" style="font-size:17px;color:var(--muted2)">—</span><span class="pdot" id="kpi-auto-dot" style="width:9px;height:9px;border-radius:50%;background:#aab0bb"></span></div><div class="kpi-break" id="kpi-auto-sub" style="font-size:11px;color:var(--muted);font-family:var(--mono)"></div></div>
           </div>
@@ -314,7 +317,7 @@
               </div>
               <div class="btn-row" style="margin-left:auto">
                 <button class="btn btn-ghost" id="btn-reload">Actualizar</button>
-                <button class="btn btn-accent" id="btn-print-pending">Imprimir todo lo pendiente (<span id="print-pending-count">0</span>)</button>
+                <button class="btn btn-accent" id="btn-print-pending">Imprimir lo de hoy (<span id="print-pending-count">0</span>)</button>
               </div>
             </div>
             <div id="layout-hint-row" style="margin-top:11px;padding-top:11px;border-top:1px solid var(--line);align-items:center;gap:10px;font-size:12px;color:var(--ink3);display:none">
@@ -322,6 +325,16 @@
               <span id="layout-hint">—</span>
               <button class="btn btn-ghost" id="btn-layout-preview" style="margin-left:auto;padding:5px 12px;font-size:12px">Ver acomodo (PDF)</button>
             </div>
+          </div>
+
+          <!-- buscador de etiquetas: filtra las tres columnas -->
+          <div class="card" style="padding:10px 16px;display:flex;align-items:center;gap:10px;flex-direction:row">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--muted2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input id="q-search" type="search" autocomplete="off" spellcheck="false"
+                   placeholder="Buscar etiqueta: producto, cliente, nº de venta, envío/guía, SKU, PO, tienda…"
+                   style="flex:1;min-width:0;border:none;outline:none;font:inherit;font-size:13px;background:transparent;color:var(--ink)">
+            <span id="q-search-count" style="display:none;flex:0 0 auto;font-family:var(--mono);font-size:11.5px;color:var(--muted2)"></span>
+            <button class="xbtn" id="q-search-clear" title="Limpiar búsqueda (Esc)" style="display:none">✕</button>
           </div>
 
           <!-- filtro por tienda (chips con conteo y estado) -->
@@ -349,21 +362,23 @@
           </div>
 
           <div class="kanban">
-            <!-- Próximos (pendientes por imprimir) -->
+            <!-- Próximos (siguientes días, según fecha límite de ML) -->
             <div class="card kcol">
               <div class="kcol-head">
-                <div style="display:flex;align-items:center;gap:8px"><span class="pdot" style="width:8px;height:8px;border-radius:50%;background:#c0a000"></span><span class="sec-title">Próximos</span></div>
-                <div style="display:flex;align-items:center;gap:8px"><button class="btn btn-ghost" id="btn-select-all" style="padding:4px 9px;font-size:11px">Seleccionar todo</button><span class="kcount" id="col-next-count">0</span></div>
+                <div style="display:flex;align-items:center;gap:8px"><span class="pdot" style="width:8px;height:8px;border-radius:50%;background:#c0a000"></span><span class="sec-title">Próximos</span><span style="font-size:11px;color:var(--muted2)">siguientes días</span></div>
+                <span class="kcount" id="col-next-count">0</span>
               </div>
+              <div class="kcol-sub" id="col-next-stores" style="display:none"></div>
               <div class="kcol-list" id="col-next"></div>
             </div>
 
-            <!-- A imprimir (selección manual) -->
+            <!-- A imprimir (hoy, según fecha límite de ML) -->
             <div class="card kcol">
               <div class="kcol-head">
-                <div style="display:flex;align-items:center;gap:8px"><span class="pdot" style="width:8px;height:8px;border-radius:50%;background:var(--accent)"></span><span class="sec-title">A imprimir</span></div>
-                <span class="kcount" id="col-sel-count">0</span>
+                <div style="display:flex;align-items:center;gap:8px"><span class="pdot" style="width:8px;height:8px;border-radius:50%;background:var(--accent)"></span><span class="sec-title">A imprimir</span><span style="font-size:11px;color:var(--muted2)">hoy</span></div>
+                <div style="display:flex;align-items:center;gap:8px"><button class="btn btn-ghost" id="btn-select-all" style="padding:4px 9px;font-size:11px">Marcar todo</button><span class="kcount" id="col-sel-count">0</span></div>
               </div>
+              <div class="kcol-sub" id="col-sel-stores" style="display:none"></div>
               <div class="kcol-list" id="col-sel"></div>
               <button class="btn btn-accent" id="btn-print-selected" style="margin:10px 6px 0">Imprimir seleccionadas (<span id="print-sel-count">0</span>)</button>
             </div>
