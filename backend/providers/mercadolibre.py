@@ -229,13 +229,15 @@ def _normalize(order: dict, shipment: dict) -> dict:
                  "quantity": it.get("quantity", 1),
                  "sku": (it.get("item") or {}).get("seller_sku") or ""} for it in items]
     units = sum(int(p.get("quantity", 1) or 1) for p in products)
-    # Fecha límite de despacho según ML: define si la etiqueta es "para hoy"
-    # o "próxima". Con x-format-new viene en lead_time; el formato viejo la
-    # trae en shipping_option.
+    # Fecha que decide si la etiqueta es "para hoy" o "próxima":
+    # estimated_handling_limit (límite de despacho, según tipo logístico) o
+    # buffering.date (venta programada: ML la libera para despacho futuro).
+    # En xd_drop_off (formato nuevo) solo existe buffering; null = para hoy.
     lead = shipment.get("lead_time") or {}
     opt = shipment.get("shipping_option") or {}
     handling_limit = ((lead.get("estimated_handling_limit") or {}).get("date")
-                      or (opt.get("estimated_handling_limit") or {}).get("date"))
+                      or (opt.get("estimated_handling_limit") or {}).get("date")
+                      or (lead.get("buffering") or {}).get("date"))
     return {
         "order_id": order.get("id"), "shipment_id": shipment.get("id"),
         "pack_id": order.get("pack_id"), "date_created": order.get("date_created"),

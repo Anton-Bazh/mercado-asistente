@@ -111,8 +111,15 @@ def list_all_pending() -> dict:
             r["account_name"] = name
             r["provider"] = acc.get("provider")
             _remember_order(r)
-            already = (r.get("substatus") == "printed"
-                       or str(r.get("shipment_id")) in recent)
+            if acc.get("provider") == "ml":
+                # ML: solo estos subestados siguen por imprimir. printed,
+                # picked_up, dropped_off, in_hub… ya tienen etiqueta impresa
+                # (contarlos inflaba la cola frente al panel de ML).
+                already = r.get("substatus") not in ("ready_to_print",
+                                                     "stale", "delayed")
+            else:
+                already = r.get("substatus") == "printed"
+            already = already or str(r.get("shipment_id")) in recent
             r["pending"] = not already
             r["multi_unit"] = int(r.get("units", 1) or 1) > threshold
             r["due"] = due_bucket(r.get("handling_limit"))
