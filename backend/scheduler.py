@@ -188,7 +188,7 @@ def _tick() -> None:
     # Multi-unidad NUNCA entra al automático (se gestiona manual en Separación).
     # Tampoco los "próximos": solo se imprime lo que el marketplace marca para hoy.
     pending = [r for r in rows if r.get("pending") and not r.get("multi_unit")
-               and r.get("due") != "upcoming"]
+               and r.get("due") != "upcoming" and r.get("printable") is not False]
     if not pending:
         _set("idle_ok", f"Activo ({label}). No hay pendientes para imprimir hoy.")
         return

@@ -9,6 +9,7 @@ import base64
 import hashlib
 import secrets
 import time
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
 import httpx
@@ -164,7 +165,9 @@ class MLProvider(Provider):
                 shipment = self._get_shipment(account, sid)
             except ProviderError:
                 continue
-            if shipment.get("status") != "ready_to_ship":
+            # ready_to_ship = imprimible; pending/handling (p. ej. buffered =
+            # venta programada) aún no tiene etiqueta → va a «Próximos».
+            if shipment.get("status") not in ("ready_to_ship", "pending", "handling"):
                 continue
             seen.add(str(sid))
             rows.append(_normalize(order, shipment))
@@ -229,15 +232,25 @@ def _normalize(order: dict, shipment: dict) -> dict:
                  "quantity": it.get("quantity", 1),
                  "sku": (it.get("item") or {}).get("seller_sku") or ""} for it in items]
     units = sum(int(p.get("quantity", 1) or 1) for p in products)
-    # Fecha que decide si la etiqueta es "para hoy" o "próxima":
-    # estimated_handling_limit (límite de despacho, según tipo logístico) o
-    # buffering.date (venta programada: ML la libera para despacho futuro).
-    # En xd_drop_off (formato nuevo) solo existe buffering; null = para hoy.
+    # Fecha que decide si la etiqueta es "para hoy" o "próxima", en orden:
+    # 1) estimated_handling_limit (límite de despacho; no viene en xd_drop_off)
+    # 2) buffering.date (venta programada aún en procesamiento)
+    # 3) derivada: entrega estimada menos el tránsito (offset.shipping horas);
+    #    validado con datos reales: entrega mañana ⇒ despachar hoy.
     lead = shipment.get("lead_time") or {}
     opt = shipment.get("shipping_option") or {}
     handling_limit = ((lead.get("estimated_handling_limit") or {}).get("date")
                       or (opt.get("estimated_handling_limit") or {}).get("date")
                       or (lead.get("buffering") or {}).get("date"))
+    if not handling_limit:
+        edt = lead.get("estimated_delivery_time") or {}
+        if edt.get("date"):
+            try:
+                transit_h = int((edt.get("offset") or {}).get("shipping") or 24)
+                dt = datetime.fromisoformat(str(edt["date"]).replace("Z", "+00:00"))
+                handling_limit = (dt - timedelta(hours=transit_h)).isoformat()
+            except (ValueError, TypeError):
+                pass
     return {
         "order_id": order.get("id"), "shipment_id": shipment.get("id"),
         "pack_id": order.get("pack_id"), "date_created": order.get("date_created"),
@@ -246,6 +259,9 @@ def _normalize(order: dict, shipment: dict) -> dict:
         "total_amount": order.get("total_amount"), "currency": order.get("currency_id", ""),
         "shipment_status": shipment.get("status"), "substatus": shipment.get("substatus"),
         "handling_limit": handling_limit,
+        # sin etiqueta todavía (en procesamiento/programada): no se puede
+        # imprimir ni separar; se muestra en «Próximos» como informativa.
+        "printable": shipment.get("status") == "ready_to_ship",
     }
 
 

@@ -112,17 +112,25 @@ def list_all_pending() -> dict:
             r["provider"] = acc.get("provider")
             _remember_order(r)
             if acc.get("provider") == "ml":
-                # ML: solo estos subestados siguen por imprimir. printed,
-                # picked_up, dropped_off, in_hub… ya tienen etiqueta impresa
-                # (contarlos inflaba la cola frente al panel de ML).
-                already = r.get("substatus") not in ("ready_to_print",
-                                                     "stale", "delayed")
+                if r.get("printable") is False:
+                    # en procesamiento / programada: visible en «Próximos»,
+                    # sin etiqueta que imprimir todavía.
+                    already = False
+                else:
+                    # ML: solo estos subestados siguen por imprimir. printed,
+                    # picked_up, dropped_off, in_hub… ya tienen etiqueta
+                    # impresa (contarlos inflaba la cola frente a ML).
+                    already = r.get("substatus") not in ("ready_to_print",
+                                                         "stale", "delayed")
             else:
                 already = r.get("substatus") == "printed"
             already = already or str(r.get("shipment_id")) in recent
             r["pending"] = not already
-            r["multi_unit"] = int(r.get("units", 1) or 1) > threshold
-            r["due"] = due_bucket(r.get("handling_limit"))
+            # multi-unidad va a Separación, pero solo si ya es imprimible
+            r["multi_unit"] = (r.get("printable") is not False
+                               and int(r.get("units", 1) or 1) > threshold)
+            r["due"] = ("upcoming" if r.get("printable") is False
+                        else due_bucket(r.get("handling_limit")))
             orders.append(r)
 
     return {

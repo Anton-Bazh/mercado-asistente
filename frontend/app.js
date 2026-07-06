@@ -105,7 +105,11 @@ function pendingPool() { return state.orders.filter(o => o.pending && !o.multi_u
 function manualList() { return state.orders.filter(o => o.pending && o.multi_unit); }
 // Las columnas siguen el dato de ML (row.due, por fecha límite de despacho):
 // A imprimir = hoy/vencidas (+ adelantadas a mano); Próximos = siguientes días.
-function isForToday(o) { return o.due !== 'upcoming' || state.advanced.has(String(o.shipment_id)); }
+// printable=false (en procesamiento/programada) nunca pasa a «A imprimir».
+function isForToday(o) {
+  if (o.printable === false) return false;
+  return o.due !== 'upcoming' || state.advanced.has(String(o.shipment_id));
+}
 function nextList() {
   return pendingPool().filter(o => !isForToday(o))
     .sort((a, b) => String(a.handling_limit || '').localeCompare(String(b.handling_limit || '')));
@@ -472,14 +476,17 @@ function timeAgo(iso) {
 }
 // Etiqueta de fecha límite de despacho (dato de ML): cuándo toca imprimirla.
 function dueTag(o) {
+  const tags = [];
+  if (o.printable === false)
+    tags.push('<span class="qtag" style="background:#eef4ff;color:#2f56c0">en procesamiento</span>');
   if (o.due === 'overdue')
-    return '<span class="qtag" style="background:#fbe9e9;color:#c43232">vencida</span>';
-  if (o.due === 'upcoming' && o.handling_limit) {
+    tags.push('<span class="qtag" style="background:#fbe9e9;color:#c43232">vencida</span>');
+  else if (o.due === 'upcoming' && o.handling_limit) {
     const d = new Date(o.handling_limit);
     if (!isNaN(d.getTime()))
-      return `<span class="qtag" style="background:#fbf2dd;color:#7a5b00">para ${esc(d.toLocaleDateString('es-MX', { weekday:'short', day:'2-digit', month:'short' }))}</span>`;
+      tags.push(`<span class="qtag" style="background:#fbf2dd;color:#7a5b00">para ${esc(d.toLocaleDateString('es-MX', { weekday:'short', day:'2-digit', month:'short' }))}</span>`);
   }
-  return '';
+  return tags.join('');
 }
 function qTags(o) {
   const tags = [];
@@ -502,10 +509,13 @@ function colaItemHtml(o, kind) {
       ${qTags(o)}
     </div>`;
   if (kind === 'next') {
-    // Próximos: informativa (la fecha la pone ML); solo permite adelantarla.
+    // Próximos: informativa (la fecha la pone ML); solo una etiqueta ya
+    // generada se puede adelantar — «en procesamiento» aún no tiene.
+    const adv = o.printable === false ? ''
+      : `<button class="xbtn" title="Adelantar a «A imprimir»" data-sid="${esc(sid)}" data-act="advance" style="color:var(--accent);align-self:center;font-size:14px">→</button>`;
     return `<div class="q-item mk" style="--mkc:${mkColor(o.provider)}" data-sid="${esc(sid)}">
       ${body}
-      <button class="xbtn" title="Adelantar a «A imprimir»" data-sid="${esc(sid)}" data-act="advance" style="color:var(--accent);align-self:center;font-size:14px">→</button>
+      ${adv}
     </div>`;
   }
   // A imprimir (hoy): la casilla arma el lote; la tarjeta no cambia de columna.
