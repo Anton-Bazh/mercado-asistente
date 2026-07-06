@@ -6,6 +6,8 @@ cola. Aísla errores: si una cuenta falla, las demás siguen.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import label_stub
 import logutil
 import storage
@@ -47,6 +49,28 @@ def account_public(a: dict) -> dict:
         "seller_id": a.get("seller_id"),
         "token_expires_in": max(0, exp - int(time.time())) if a.get("refresh_token") else None,
     }
+
+
+def due_bucket(iso: str | None) -> str:
+    """Clasifica la fecha límite de despacho del marketplace.
+
+    'today' = debe imprimirse hoy · 'upcoming' = para los siguientes días ·
+    'overdue' = la fecha límite ya pasó. Sin fecha (marketplaces que no la
+    reportan) se asume 'today': el pedido ya está listo para enviar.
+    """
+    if not iso:
+        return "today"
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return "today"
+    limit_day = dt.astimezone().date()
+    today = datetime.now().astimezone().date()
+    if limit_day > today:
+        return "upcoming"
+    if limit_day < today:
+        return "overdue"
+    return "today"
 
 
 def list_all_pending() -> dict:
@@ -91,6 +115,7 @@ def list_all_pending() -> dict:
                        or str(r.get("shipment_id")) in recent)
             r["pending"] = not already
             r["multi_unit"] = int(r.get("units", 1) or 1) > threshold
+            r["due"] = due_bucket(r.get("handling_limit"))
             orders.append(r)
 
     return {
