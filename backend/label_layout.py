@@ -21,6 +21,33 @@ from config import (
 )
 
 
+def _label_rect(page: "fitz.Page") -> "fitz.Rect":
+    """Área real de la etiqueta dentro de la página.
+
+    ML a veces entrega la etiqueta 10x15 sobre una página tamaño carta/A4
+    (el resto es espacio en blanco). Si se midiera la página, saldría "1 por
+    hoja" y el acomodo no ahorraría nada. Se toma el bbox del contenido
+    dibujado (+margen); si el contenido llena la página, se usa completa.
+    """
+    r = page.rect
+    try:
+        bbox = fitz.Rect()
+        for item in page.get_bboxlog():
+            bbox |= fitz.Rect(item[1])
+        bbox &= r
+    except Exception:
+        return r
+    if bbox.is_empty or bbox.is_infinite:
+        return r
+    pad = 6.0
+    bbox = fitz.Rect(bbox.x0 - pad, bbox.y0 - pad,
+                     bbox.x1 + pad, bbox.y1 + pad) & r
+    # contenido ≈ página completa: no hay nada que recortar
+    if bbox.width * bbox.height >= 0.85 * r.width * r.height:
+        return r
+    return bbox
+
+
 def _grid_for(label_w: float, label_h: float,
               sheet_w: float, sheet_h: float) -> tuple[int, int]:
     """Cuántas columnas y filas de una etiqueta caben en la hoja."""
@@ -127,13 +154,32 @@ def build_preview(count: int, label_w: float, label_h: float,
 
 
 def per_sheet_for(pdf_bytes: bytes) -> int:
-    """Cuántas etiquetas caben por hoja, midiendo la primera página del PDF."""
+    """Cuántas etiquetas caben por hoja, midiendo la primera página del PDF.
+
+    Mide el área real de la etiqueta (no el papel): una etiqueta 10x15 sobre
+    página carta cuenta como 10x15.
+    """
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         if src.page_count == 0:
             return 1
-        r = src.load_page(0).rect
+        r = _label_rect(src.load_page(0))
         return _best_layout(r.width, r.height)["per_sheet"]
+    finally:
+        src.close()
+
+
+def label_size(pdf_bytes: bytes) -> tuple[float, float] | None:
+    """Tamaño real (w, h) en puntos de la etiqueta de la primera página."""
+    try:
+        src = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception:
+        return None
+    try:
+        if src.page_count == 0:
+            return None
+        r = _label_rect(src.load_page(0))
+        return r.width, r.height
     finally:
         src.close()
 
@@ -176,8 +222,9 @@ def pack_labels_to_sheets(pdf_bytes: bytes) -> tuple[bytes, dict]:
             return pdf_bytes, {"labels": 0, "labels_per_sheet": 0, "sheets": 0,
                                "cols": 0, "rows": 0, "packed": False}
 
-        first = src.load_page(0)
-        label_w, label_h = first.rect.width, first.rect.height
+        # Área real de cada etiqueta (recorta el papel sobrante de ML).
+        clips = [_label_rect(src.load_page(i)) for i in range(n)]
+        label_w, label_h = clips[0].width, clips[0].height
         layout = _best_layout(label_w, label_h)
         per_sheet = layout["per_sheet"]
 
@@ -210,7 +257,7 @@ def pack_labels_to_sheets(pdf_bytes: bytes) -> tuple[bytes, dict]:
                 x0 = SHEET_MARGIN_PT + col * (cell_w + LABEL_GAP_PT)
                 y0 = SHEET_MARGIN_PT + row * (cell_h + LABEL_GAP_PT)
                 target = fitz.Rect(x0, y0, x0 + cell_w, y0 + cell_h)
-                sheet.show_pdf_page(target, src, i, rotate=rotate)
+                sheet.show_pdf_page(target, src, i, clip=clips[i], rotate=rotate)
 
             result = out.tobytes()
         finally:

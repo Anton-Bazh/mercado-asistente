@@ -229,6 +229,13 @@ def _normalize(order: dict, shipment: dict) -> dict:
                  "quantity": it.get("quantity", 1),
                  "sku": (it.get("item") or {}).get("seller_sku") or ""} for it in items]
     units = sum(int(p.get("quantity", 1) or 1) for p in products)
+    # Fecha límite de despacho según ML: define si la etiqueta es "para hoy"
+    # o "próxima". Con x-format-new viene en lead_time; el formato viejo la
+    # trae en shipping_option.
+    lead = shipment.get("lead_time") or {}
+    opt = shipment.get("shipping_option") or {}
+    handling_limit = ((lead.get("estimated_handling_limit") or {}).get("date")
+                      or (opt.get("estimated_handling_limit") or {}).get("date"))
     return {
         "order_id": order.get("id"), "shipment_id": shipment.get("id"),
         "pack_id": order.get("pack_id"), "date_created": order.get("date_created"),
@@ -236,20 +243,19 @@ def _normalize(order: dict, shipment: dict) -> dict:
         "products": products, "units": units,
         "total_amount": order.get("total_amount"), "currency": order.get("currency_id", ""),
         "shipment_status": shipment.get("status"), "substatus": shipment.get("substatus"),
+        "handling_limit": handling_limit,
     }
 
 
 def _remember_label_size(pdf_bytes: bytes) -> None:
+    # Guarda el tamaño REAL de la etiqueta (recortada del papel sobrante),
+    # para que el plan de acomodo y el modo automático calculen bien las hojas.
     try:
-        import fitz
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        try:
-            if doc.page_count:
-                r = doc.load_page(0).rect
-                storage.set_value(storage.LABEL_W, f"{r.width:.2f}")
-                storage.set_value(storage.LABEL_H, f"{r.height:.2f}")
-        finally:
-            doc.close()
+        import label_layout
+        size = label_layout.label_size(pdf_bytes)
+        if size:
+            storage.set_value(storage.LABEL_W, f"{size[0]:.2f}")
+            storage.set_value(storage.LABEL_H, f"{size[1]:.2f}")
     except Exception:
         pass
 
