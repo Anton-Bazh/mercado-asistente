@@ -1,9 +1,10 @@
 """Estampado de etiquetas — lógica portada del Extractor de Etiquetas.
 
 Dibuja SOBRE la etiqueta individual que entrega la API (sin crecer el lienzo,
-a diferencia del talón de label_stub): folio con el color del día, nombre de
-empresa, logo, teléfono de contacto, punto rojo de margen bajo (markup ≤ 5) y
-código de lote al pie. Se aplica ANTES del acomodo n-up.
+a diferencia del talón de label_stub): folio Y nombre de empresa en el color
+del día (los dos — así identifica el día en bodega), logo, teléfono de
+contacto, punto rojo de saldo negativo en venta (markup ≤ 5) y código de lote
+al pie. Se aplica ANTES del acomodo n-up.
 
 Las posiciones son FRACCIONES del rectángulo de la etiqueta (derivadas de las
 proporciones del Extractor sobre el formato de 3 por hoja carta) — ⚠ PENDIENTE
@@ -60,7 +61,9 @@ CONTACTS = {
 }
 DEFAULT_CONTACT = "735 252 7148"
 
-# Umbral de margen bajo (punto rojo + auditoría) — regla del Extractor.
+# Punto rojo = SALDO NEGATIVO EN VENTA (la venta está en pérdida). El umbral
+# markup ≤ 5 es la regla del Extractor para detectarlo (con ese margen la venta
+# queda en negativo tras los demás costos). Siempre rojo; dispara auditoría.
 LOW_MARKUP = 5
 
 # --- Zonas del estampado (fracciones del rect de la etiqueta) ----------------
@@ -132,7 +135,7 @@ def _stamp_page(page: fitz.Page, *, folio: int, company: str,
     r = page.rect
     w, h = r.width, r.height
 
-    # Punto rojo de margen bajo (alerta para empaque).
+    # Punto rojo: saldo negativo en venta (alerta física para empaque/despacho).
     if low:
         c = fitz.Point(r.x0 + w * Z_DOT[0], r.y0 + h * Z_DOT[1])
         page.draw_circle(c, R_DOT, color=(1, 1, 1), fill=(1, 0, 0), width=1.5)
