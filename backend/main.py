@@ -16,6 +16,7 @@ import logutil
 
 logutil.setup()   # antes de importar módulos que crean loggers/hilos
 
+import label_enrich
 import label_layout
 import label_stub
 import orders_hub
@@ -624,11 +625,15 @@ def layout_plan(count: int = 1, provider: str = "") -> JSONResponse:
 
 
 @app.get("/api/layout-preview")
-def layout_preview(count: int = 4, provider: str = "") -> Response:
+def layout_preview(count: int = 4, provider: str = "", company: str = "INMATMEX",
+                   folio: int = 101, low: str = "1") -> Response:
     """PDF de muestra con el acomodo real (sin tocar el marketplace ni gastar papel).
 
     Con `provider`, la muestra usa el tamaño de ese marketplace y, si el talón
     de control está activo para él, las etiquetas de muestra lo incluyen.
+    Para Mercado Libre (o sin provider) las muestras salen ESTAMPADAS
+    (logo/folio/punto — unificación con el Extractor); company/folio/low
+    controlan la vista.
     """
     w, h, _real = _provider_label_size(provider)
     count = max(1, count)
@@ -637,6 +642,10 @@ def layout_preview(count: int = 4, provider: str = "") -> Response:
     if provider and label_stub.enabled_for(provider):
         sample = label_stub.add_stub(sample, label_stub.SAMPLE_PRODUCTS,
                                      order_ref="PEDIDO-DEMO")
+    if provider in ("", "ml"):
+        sample = label_enrich.enrich(
+            sample, folio=folio, company=company, batch_code="A1B2C",
+            markup=3.0 if low in ("1", "true", "on") else None)
     pdf = label_layout.build_preview(count, w, h, pages=sample)
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": 'inline; filename="acomodo.pdf"'})
@@ -671,17 +680,33 @@ def set_stub_config(provider: str = Form(""), account_id: str = Form(""),
 
 
 @app.get("/api/stub-preview")
-def stub_preview(provider: str = "walmart") -> Response:
+def stub_preview(provider: str = "walmart", company: str = "INMATMEX",
+                 folio: int = 101, low: str = "1") -> Response:
     """Una etiqueta de muestra tal como saldrá impresa con la config actual
-    (con talón si está activo para ese marketplace; sin él si no)."""
+    (con talón si está activo para ese marketplace; ML sale ESTAMPADA con
+    logo/folio/punto — unificación con el Extractor)."""
     w, h, _real = _provider_label_size(provider)
     pdf = label_layout.sample_labels(1, w, h,
                                      brand=_PROVIDER_BRANDS.get(provider, "MUESTRA"))
     if label_stub.enabled_for(provider):
         pdf = label_stub.add_stub(pdf, label_stub.SAMPLE_PRODUCTS,
                                   order_ref="PEDIDO-DEMO")
+    if provider in ("", "ml"):
+        pdf = label_enrich.enrich(
+            pdf, folio=folio, company=company, batch_code="A1B2C",
+            markup=3.0 if low in ("1", "true", "on") else None)
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": 'inline; filename="etiqueta.pdf"'})
+
+
+@app.get("/api/enrich-config")
+def enrich_config() -> JSONResponse:
+    """Catálogo del estampado para la interfaz: empresas y color del día."""
+    return JSONResponse({
+        "companies": sorted(set(label_enrich.LOGO_FILES) - {"MTM"}),
+        "day_color": label_enrich.day_color(),
+        "low_markup": label_enrich.LOW_MARKUP,
+    })
 
 
 # --- Importar PDF de etiquetas (TikTok Shop, Walmart) --------------------------

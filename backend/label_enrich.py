@@ -105,6 +105,10 @@ def enrich(pdf_bytes: bytes, *, folio: int, company: str,
     folio: consecutivo de la etiqueta física · company: tienda/empresa (se
     normaliza) · batch_code: código de lote (pie) · markup: si ≤ 5 dibuja el
     punto rojo · color: hex del folio (por defecto, el del día).
+
+    En producción cada envío llega en su propio PDF (1 página = 1 folio); si
+    el PDF trae varias páginas (lote de muestra), el folio incrementa por
+    página para previsualizar el consecutivo.
     """
     key = normalize_company(company)
     rgb = _hex_rgb(color or day_color())
@@ -113,8 +117,8 @@ def enrich(pdf_bytes: bytes, *, folio: int, company: str,
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
-        for page in doc:
-            _stamp_page(page, folio=folio, company=key, rgb=rgb,
+        for i, page in enumerate(doc):
+            _stamp_page(page, folio=folio + i, company=key, rgb=rgb,
                         contact=contact, logo=logo, batch_code=batch_code,
                         low=(markup is not None and markup <= LOW_MARKUP))
         return doc.tobytes()

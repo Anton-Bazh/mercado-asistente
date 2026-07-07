@@ -610,6 +610,18 @@
               <span style="font-size:12px;color:var(--label)">etiquetas</span>
               <span id="stub-plan-text" style="font-size:12px;color:var(--muted);font-family:var(--mono)"></span>
             </div>
+            <!-- estampado (unificación con el Extractor) — solo Mercado Libre -->
+            <div id="enrich-controls" style="display:none;align-items:center;gap:9px;flex-wrap:wrap;margin:-4px 0 12px;padding:8px 12px;border:1px dashed #d8dbe1;border-radius:10px">
+              <span style="font-size:12px;font-weight:700;color:var(--label)">Estampado</span>
+              <span style="font-size:12px;color:var(--label)">empresa</span>
+              <select id="enrich-company" style="border:1px solid #d8dbe1;border-radius:9px;padding:7px 10px;font:inherit;font-size:13px;outline:none"></select>
+              <span style="font-size:12px;color:var(--label)">folio inicial</span>
+              <input type="number" id="enrich-folio" value="101" min="1" style="width:76px;border:1px solid #d8dbe1;border-radius:9px;padding:6px 9px;font:inherit;font-size:13px;outline:none">
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--label);cursor:pointer">
+                <input type="checkbox" id="enrich-low" checked> margen bajo (punto rojo)
+              </label>
+              <span id="enrich-day" style="font-size:12px;color:var(--muted);font-family:var(--mono)"></span>
+            </div>
             <div style="display:flex;gap:14px;flex-wrap:wrap">
               <div style="flex:1;min-width:300px">
                 <div style="font-size:11.5px;font-weight:700;color:var(--muted2);letter-spacing:.4px;margin-bottom:6px">ETIQUETA (una guía)</div>

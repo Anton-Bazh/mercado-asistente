@@ -1067,8 +1067,18 @@ async function updateStubPreviews() {
   const prov = $('stub-prev-provider') ? $('stub-prev-provider').value : 'walmart';
   const n = parseInt($('stub-count').value, 10) || 8;
   const bust = Date.now();
-  $('stub-frame-label').src = `/api/stub-preview?provider=${prov}&_=${bust}`;
-  $('stub-frame-sheet').src = `/api/layout-preview?count=${n}&provider=${prov}&_=${bust}`;
+  // Estampado (unificación con el Extractor): solo aplica a Mercado Libre.
+  const isMl = prov === 'ml';
+  $('enrich-controls').style.display = isMl ? 'flex' : 'none';
+  let enrich = '';
+  if (isMl) {
+    const comp = encodeURIComponent($('enrich-company').value || 'INMATMEX');
+    const folio = parseInt($('enrich-folio').value, 10) || 101;
+    const low = $('enrich-low').checked ? '1' : '0';
+    enrich = `&company=${comp}&folio=${folio}&low=${low}`;
+  }
+  $('stub-frame-label').src = `/api/stub-preview?provider=${prov}${enrich}&_=${bust}`;
+  $('stub-frame-sheet').src = `/api/layout-preview?count=${n}&provider=${prov}${enrich}&_=${bust}`;
   try {
     const pl = await api(`/api/layout-plan?count=${n}&provider=${prov}`);
     $('stub-plan-text').textContent =
@@ -1684,6 +1694,20 @@ function init() {
   });
   $('stub-count').addEventListener('change', updateStubPreviews);
   $('stub-prev-provider').addEventListener('change', updateStubPreviews);
+
+  // estampado (unificación con el Extractor): empresas desde el backend
+  (async () => {
+    try {
+      const cfg = await api('/api/enrich-config');
+      $('enrich-company').innerHTML = (cfg.companies || [])
+        .map(c => `<option value="${esc(c)}" ${c === 'INMATMEX' ? 'selected' : ''}>${esc(c)}</option>`).join('');
+      $('enrich-day').textContent = `folio de hoy: ${cfg.day_color}`;
+      $('enrich-day').style.color = cfg.day_color;
+    } catch { /* sin catálogo: el select queda vacío y el backend usa INMATMEX */ }
+  })();
+  $('enrich-company').addEventListener('change', updateStubPreviews);
+  $('enrich-folio').addEventListener('change', updateStubPreviews);
+  $('enrich-low').addEventListener('change', updateStubPreviews);
 
   // importar PDF de etiquetas (TikTok Shop / Walmart)
   const PDF_IMPORT_HINTS = {
