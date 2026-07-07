@@ -239,18 +239,17 @@ def _normalize(order: dict, shipment: dict) -> dict:
     #    validado con datos reales: entrega mañana ⇒ despachar hoy.
     lead = shipment.get("lead_time") or {}
     opt = shipment.get("shipping_option") or {}
+    edt = lead.get("estimated_delivery_time") or {}
     handling_limit = ((lead.get("estimated_handling_limit") or {}).get("date")
                       or (opt.get("estimated_handling_limit") or {}).get("date")
                       or (lead.get("buffering") or {}).get("date"))
-    if not handling_limit:
-        edt = lead.get("estimated_delivery_time") or {}
-        if edt.get("date"):
-            try:
-                transit_h = int((edt.get("offset") or {}).get("shipping") or 24)
-                dt = datetime.fromisoformat(str(edt["date"]).replace("Z", "+00:00"))
-                handling_limit = (dt - timedelta(hours=transit_h)).isoformat()
-            except (ValueError, TypeError):
-                pass
+    if not handling_limit and edt.get("date"):
+        try:
+            transit_h = int((edt.get("offset") or {}).get("shipping") or 24)
+            dt = datetime.fromisoformat(str(edt["date"]).replace("Z", "+00:00"))
+            handling_limit = (dt - timedelta(hours=transit_h)).isoformat()
+        except (ValueError, TypeError):
+            pass
     return {
         "order_id": order.get("id"), "shipment_id": shipment.get("id"),
         "pack_id": order.get("pack_id"), "date_created": order.get("date_created"),
@@ -259,6 +258,18 @@ def _normalize(order: dict, shipment: dict) -> dict:
         "total_amount": order.get("total_amount"), "currency": order.get("currency_id", ""),
         "shipment_status": shipment.get("status"), "substatus": shipment.get("substatus"),
         "handling_limit": handling_limit,
+        # --- registro de etiquetas (unificación con el Extractor) ---
+        # tracking_number = lo que codifica el código de barras de la etiqueta;
+        # delivery_estimate = la fecha "Entregar: dd/mmm" impresa (NO el límite
+        # de despacho); receiver estructurado para etiquetas_i (cp/city/state).
+        "tracking_number": shipment.get("tracking_number"),
+        "delivery_estimate": edt.get("date"),
+        "receiver": {
+            "name": addr.get("receiver_name") or buyer_name,
+            "zip": addr.get("zip_code"),
+            "city": (city.get("name") if isinstance(city, dict) else city) or None,
+            "state": (state.get("name") if isinstance(state, dict) else state) or None,
+        },
         # sin etiqueta todavía (en procesamiento/programada): no se puede
         # imprimir ni separar; se muestra en «Próximos» como informativa.
         "printable": shipment.get("status") == "ready_to_ship",

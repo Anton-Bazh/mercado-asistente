@@ -222,13 +222,29 @@ def _normalize(order: dict) -> dict:
     if isinstance(created, (int, float)) and created > 0:
         created = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(created))
 
+    # district_info viene de mayor a menor (estado → ciudad/municipio → colonia).
+    districts = [d.get("address_name") for d in addr.get("district_info") or []
+                 if d.get("address_name")]
+
     return {
         "order_id": oid, "shipment_id": package_id or f"PO{oid}",
-        "pack_id": None, "date_created": created,
+        # pack_id: el paquete es el agrupador de TikTok — equivalente más
+        # cercano para el registro de etiquetas.
+        "pack_id": package_id, "date_created": created,
         "buyer_name": addr.get("name") or "—", "address": address or "—",
         "products": products, "units": units or 1,
         "total_amount": payment.get("total_amount"),
         "currency": payment.get("currency") or "MXN",
         "shipment_status": "ready_to_ship" if package_id else "pending_label",
         "substatus": None if package_id else "sin guía",
+        # --- registro de etiquetas (unificación con el Extractor) ---
+        "tracking_number": (order.get("tracking_number")
+                            or (packages[0].get("tracking_number") if packages else None)),
+        "delivery_estimate": None,   # TikTok no expone fecha prometida utilizable
+        "receiver": {
+            "name": addr.get("name"),
+            "zip": addr.get("zipcode") or addr.get("postal_code"),
+            "city": districts[1] if len(districts) > 1 else None,
+            "state": districts[0] if districts else None,
+        },
     }

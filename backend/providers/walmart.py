@@ -235,14 +235,37 @@ def _normalize(order: dict) -> dict:
         "order_id": order.get("customerOrderId") or po,
         "po": po,   # purchaseOrderId: es el que viene impreso en la guía FedEx
         "shipment_id": tracking or f"PO{po}",
-        "pack_id": None,
+        # pack_id: Walmart no tiene packs; el PO es el equivalente más cercano
+        # (es el número impreso en la guía) — lo usa el registro de etiquetas.
+        "pack_id": po or None,
         "date_created": order.get("orderDate"),
         "buyer_name": buyer_name, "address": address or "—",
         "products": products, "units": units or int(order.get("totalQuantity") or 1),
         "total_amount": total, "currency": "MXN",
         "shipment_status": "ready_to_ship" if tracking else "pending_label",
         "substatus": None if tracking else "sin guía",
+        # --- registro de etiquetas (unificación con el Extractor) ---
+        "tracking_number": tracking,
+        "delivery_estimate": _epoch_iso(shipping.get("estimatedDeliveryDate")),
+        "receiver": {
+            "name": buyer_name,
+            "zip": addr.get("postalCode"),
+            "city": addr.get("city"),
+            "state": addr.get("state"),
+        },
     }
+
+
+def _epoch_iso(value) -> str | None:
+    """Walmart manda fechas como epoch en milisegundos; a ISO local."""
+    try:
+        ms = float(value)
+    except (TypeError, ValueError):
+        return str(value) if value else None
+    if ms <= 0:
+        return None
+    import time as _time
+    return _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(ms / 1000.0))
 
 
 def _line_qty(line: dict) -> int:

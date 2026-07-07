@@ -177,11 +177,31 @@ def get_label(account_id: str, shipment_id: str, fmt: str = "pdf"):
     return content, ctype, fname
 
 
+def order_info(shipment_id: str) -> dict:
+    """Datos cacheados del pedido de un envío (para talón y registro).
+    Dict vacío si no está en caché (p. ej. tras reinicio)."""
+    return dict(_ORDER_INFO.get(str(shipment_id)) or {})
+
+
 def _remember_order(row: dict) -> None:
     sid = str(row.get("shipment_id") or "")
     if not sid:
         return
-    _ORDER_INFO[sid] = {"products": row.get("products") or [],
-                        "order_id": row.get("order_id")}
+    # Datos para el talón de control Y para el registro de etiquetas
+    # (unificación con el Extractor): el motor de lotes solo recibe el
+    # shipment_id, así que todo lo demás sale de este caché.
+    _ORDER_INFO[sid] = {
+        "products": row.get("products") or [],
+        "order_id": row.get("order_id"),
+        "pack_id": row.get("pack_id"),
+        "tracking_number": row.get("tracking_number"),
+        "receiver": row.get("receiver") or {},
+        "buyer_name": row.get("buyer_name"),
+        "handling_limit": row.get("handling_limit"),
+        "delivery_estimate": row.get("delivery_estimate"),
+        "provider": row.get("provider"),
+        "account_id": row.get("account_id"),
+        "account_name": row.get("account_name"),
+    }
     while len(_ORDER_INFO) > _ORDER_INFO_MAX:
         _ORDER_INFO.pop(next(iter(_ORDER_INFO)))
