@@ -7,8 +7,9 @@ espejo con las MISMAS columnas que las de Supabase:
 
   dev_etiquetas_i · dev_v_code · dev_auditoria
 
-y las lecturas del negocio (markup/tienda por venta, folio máximo) salen del
-fixture `dev_ml_sales`, que se puebla a mano con `seed_ml_sales()`.
+y las lecturas del negocio (markup/tienda por venta, folio máximo por empresa,
+padrón de operadores) salen de los fixtures `dev_ml_sales` y `dev_empleados`,
+que se pueblan a mano con `seed_ml_sales()` / `seed_empleados()`.
 
 Cuando llegue el momento de conectar, se sustituye el interior de estas
 funciones por llamadas a la BD corporativa SIN tocar al resto del código:
@@ -37,7 +38,7 @@ def status() -> dict:
         try:
             rows = {
                 t: conn.execute(f"SELECT COUNT(*) FROM dev_{t}").fetchone()[0]
-                for t in ("etiquetas_i", "v_code", "auditoria", "ml_sales")
+                for t in ("etiquetas_i", "v_code", "auditoria", "ml_sales", "empleados")
             }
         finally:
             conn.close()
@@ -63,12 +64,23 @@ def get_markups(pack_ids: list[str]) -> dict[str, dict]:
             for r in rows}
 
 
-def max_folio() -> int:
-    """Folio más alto registrado (0 si no hay). Para autosugerir el inicial."""
+def max_folio(organization: str | None = None) -> int:
+    """Folio más alto registrado (0 si no hay). Para autosugerir el siguiente.
+
+    Escopado por empresa/tienda (`organization`, D1 — decisión de Antonio
+    08-jul-2026: el consecutivo es por empresa, no global): cada empresa lleva
+    su propia numeración. Sin `organization` devuelve el máximo global (solo
+    para diagnóstico; el flujo real de folios siempre pasa la empresa).
+    """
     with _lock:
         conn = _connect()
         try:
-            row = conn.execute("SELECT MAX(folio) FROM dev_etiquetas_i").fetchone()
+            if organization:
+                row = conn.execute(
+                    "SELECT MAX(folio) FROM dev_etiquetas_i WHERE organization = ?",
+                    (organization,)).fetchone()
+            else:
+                row = conn.execute("SELECT MAX(folio) FROM dev_etiquetas_i").fetchone()
         finally:
             conn.close()
     return int(row[0] or 0)
@@ -84,6 +96,36 @@ def batch_code_exists(code_i: str) -> bool:
         finally:
             conn.close()
     return row is not None
+
+
+def lookup_operador(name_or_uid: str) -> dict | None:
+    """Valida un operador contra el padrón (D2 — decisión de Antonio 08-jul-2026:
+    la auditoría se valida contra el padrón único de usuarios, como el
+    Extractor). None si no está en el padrón o está inactivo.
+
+    Busca primero por uid exacto; si no, por nombre completo (sin distinguir
+    mayúsculas/acentos simples). Devuelve {uid, nombre_completo, email}.
+    """
+    key = (name_or_uid or "").strip()
+    if not key:
+        return None
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT uid, nombre_completo, email FROM dev_empleados"
+                " WHERE activo = 1 AND (uid = ? OR nombre_completo = ?) LIMIT 1",
+                (key, key)).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT uid, nombre_completo, email FROM dev_empleados"
+                    " WHERE activo = 1 AND lower(nombre_completo) = lower(?) LIMIT 1",
+                    (key,)).fetchone()
+        finally:
+            conn.close()
+    if row is None:
+        return None
+    return {"uid": row["uid"], "nombre_completo": row["nombre_completo"], "email": row["email"]}
 
 
 # === Escrituras ===============================================================
@@ -137,6 +179,25 @@ def seed_ml_sales(rows: list[dict]) -> int:
     return len(rows)
 
 
+def seed_empleados(rows: list[dict]) -> int:
+    """Carga/actualiza el fixture dev_empleados (padrón de operadores, D2)."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.executemany(
+                "INSERT INTO dev_empleados (uid, nombre_completo, email, activo)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(uid) DO UPDATE SET nombre_completo=excluded.nombre_completo,"
+                " email=excluded.email, activo=excluded.activo",
+                [(str(r["uid"]), r.get("nombre_completo"), r.get("email"),
+                  1 if r.get("activo", True) else 0) for r in rows])
+            conn.commit()
+        finally:
+            conn.close()
+    log.info("Fixture dev_empleados: %d operador(es) cargados.", len(rows))
+    return len(rows)
+
+
 # === SQLite ===================================================================
 _lock = threading.Lock()
 
@@ -178,6 +239,14 @@ def _connect() -> sqlite3.Connection:
         " num_venta TEXT PRIMARY KEY,"
         " markup NUMERIC,"
         " tienda TEXT"
+        ")"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS dev_empleados ("
+        " uid TEXT PRIMARY KEY,"
+        " nombre_completo TEXT,"
+        " email TEXT,"
+        " activo INTEGER NOT NULL DEFAULT 1"
         ")"
     )
     return conn

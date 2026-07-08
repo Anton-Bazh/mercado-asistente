@@ -6,6 +6,8 @@ consultas a Mercado Libre. Escucha solo en 127.0.0.1 sobre HTTPS (ver run.sh).
 from __future__ import annotations
 
 import json
+import random
+import string
 import time
 import uuid
 
@@ -26,6 +28,7 @@ import print_jobs
 import printers
 import scheduler
 import storage
+import supa
 import tiktok_import
 from config import FRONTEND_DIR, SITE_ID, STAMP_PATH
 from providers.base import ProviderError
@@ -416,6 +419,37 @@ def _parse_meta(meta: str) -> dict:
         return {}
 
 
+def _generate_batch_code() -> str:
+    """Código de lote de 5 caracteres A-Z0-9 (igual al Extractor), sin choque."""
+    alphabet = string.ascii_uppercase + string.digits
+    for _ in range(20):
+        code = "".join(random.choices(alphabet, k=5))
+        if not supa.batch_code_exists(code):
+            return code
+    raise HTTPException(status_code=500, detail="No se pudo generar un código de lote único.")
+
+
+def _low_margin_items(id_list: list[str]) -> list[dict]:
+    """Envíos ML del lote con saldo negativo (markup <= LOW_MARKUP) — gate de
+    auditoría (una sola consulta de markups, igual que print_jobs.start)."""
+    pack_by_sid: dict[str, str] = {}
+    pack_ids: list[str] = []
+    for sid in id_list:
+        pid = orders_hub.order_info(sid).get("pack_id")
+        if pid:
+            pack_by_sid[sid] = str(pid)
+            pack_ids.append(pid)
+    if not pack_ids:
+        return []
+    markups = supa.get_markups(pack_ids)
+    flagged = []
+    for sid, pid in pack_by_sid.items():
+        info = markups.get(pid)
+        if info and info.get("markup") is not None and info["markup"] <= label_enrich.LOW_MARKUP:
+            flagged.append({"shipment_id": sid, "pack_id": pid, "markup": info["markup"]})
+    return flagged
+
+
 def _resolve_target(printer: str) -> str:
     target = printer.strip()
     if not target:
@@ -504,8 +538,16 @@ def print_label(shipment_id: str, format: str = Form("pdf"),
 
 @app.post("/api/print-batch")
 def print_batch(ids: str = Form(...), format: str = Form("pdf"),
-                printer: str = Form(""), meta: str = Form("")) -> JSONResponse:
-    """Arranca el motor de lote en segundo plano (impresión hoja por hoja)."""
+                printer: str = Form(""), meta: str = Form(""),
+                operador: str = Form(...), code_lote: str = Form(""),
+                saldo_negativo_confirmado: str = Form("0")) -> JSONResponse:
+    """Arranca el motor de lote en segundo plano (impresión hoja por hoja).
+
+    Unificación con el Extractor (Fase 3): operador (D2, validado contra el
+    padrón), código de lote (autogenerado si no se manda) y el gate de
+    auditoría para ventas con saldo negativo — validaciones portadas del
+    Extractor, ver guía de unificación §2/§6.
+    """
     id_list = [i.strip() for i in ids.split(",") if i.strip()]
     if not id_list:
         raise HTTPException(status_code=400, detail="No se indicaron envíos.")
@@ -513,12 +555,41 @@ def print_batch(ids: str = Form(...), format: str = Form("pdf"),
     target = _resolve_target(printer)
     meta_map = _parse_meta(meta)
     items = [{"shipment_id": sid, **meta_map.get(sid, {})} for sid in id_list]
+
+    operador = operador.strip()
+    if not operador:
+        raise HTTPException(status_code=400,
+                            detail="Falta el operador que imprime (campo obligatorio).")
+    op_info = supa.lookup_operador(operador)
+    if op_info is None:
+        raise HTTPException(status_code=400,
+                            detail=f"«{operador}» no está en el padrón de usuarios; revisa el nombre.")
+
+    code_lote = code_lote.strip().upper()
+    if not code_lote:
+        code_lote = _generate_batch_code()
+    elif supa.batch_code_exists(code_lote):
+        raise HTTPException(status_code=400,
+                            detail=f"El código de lote «{code_lote}» ya existe; usa otro.")
+
+    confirmed = saldo_negativo_confirmado in ("1", "true", "on", "True")
+    if fmt == "pdf" and not confirmed:
+        flagged = _low_margin_items(id_list)
+        if flagged:
+            raise HTTPException(status_code=409, detail={
+                "message": "Hay venta(s) con saldo negativo; confirma la auditoría para imprimir.",
+                "items": flagged,
+            })
+
     try:
-        job_id = print_jobs.start(items, fmt, target)
+        job_id = print_jobs.start(items, fmt, target,
+                                  operador=op_info["nombre_completo"], code_lote=code_lote)
     except print_jobs.BatchBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    log.info("Lote %s: operador «%s», código de lote «%s».",
+             job_id, op_info["nombre_completo"], code_lote)
     return JSONResponse({"ok": True, "job_id": job_id, "printer": target,
-                         "count": len(id_list)})
+                         "count": len(id_list), "code_lote": code_lote})
 
 
 @app.get("/api/batch/status")
@@ -707,6 +778,14 @@ def enrich_config() -> JSONResponse:
         "day_color": label_enrich.day_color(),
         "low_markup": label_enrich.LOW_MARKUP,
     })
+
+
+@app.get("/api/enrich/next-folio")
+def enrich_next_folio(organization: str = "") -> JSONResponse:
+    """Siguiente folio para una empresa (D1: consecutivo por empresa/tienda,
+    no global). Informativo — el motor de lotes lo asigna solo al imprimir."""
+    org = label_enrich.normalize_company(organization)
+    return JSONResponse({"organization": org, "next_folio": supa.max_folio(org) + 1})
 
 
 # --- Importar PDF de etiquetas (TikTok Shop, Walmart) --------------------------

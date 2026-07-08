@@ -13,6 +13,8 @@ previa). Si algo falta, no imprime y lo explica en el estado.
 """
 from __future__ import annotations
 
+import random
+import string
 import threading
 import time
 from datetime import datetime
@@ -24,8 +26,16 @@ import print_jobs
 import printers
 import rules
 import storage
+import supa
 from config import DEFAULT_LABEL_W_PT, DEFAULT_LABEL_H_PT
 from providers.base import ProviderError
+
+# Identidad de operador para lo impreso por el automático: no hay ninguna
+# persona presente, así que NO se valida contra el padrón (D2 es una revisión
+# humana; aquí no aplica) — se registra con este identificador fijo para que
+# quede visible en Historial/auditoría quién (qué) lo imprimió (D3, 08-jul-2026:
+# "todo lo que se imprime se folia y registra", también lo automático).
+AUTO_OPERADOR = "Automático"
 
 log = logutil.get_logger("auto")
 
@@ -124,6 +134,17 @@ def _label_size() -> tuple[float, float, bool]:
     return DEFAULT_LABEL_W_PT, DEFAULT_LABEL_H_PT, False
 
 
+def _auto_batch_code() -> str:
+    """Código de lote de 5 caracteres A-Z0-9 para lo impreso por el automático
+    (mismo formato que el manual, ver main._generate_batch_code)."""
+    alphabet = string.ascii_uppercase + string.digits
+    for _ in range(20):
+        code = "".join(random.choices(alphabet, k=5))
+        if not supa.batch_code_exists(code):
+            return code
+    return "AUTO0"   # fallback improbable; nunca debe bloquear el automático
+
+
 def _product_summary(r: dict) -> str:
     ps = r.get("products") or []
     if not ps:
@@ -216,7 +237,8 @@ def _tick() -> None:
         for r in selected
     ]
     try:
-        print_jobs.start(items, "pdf", target, origin="auto")
+        print_jobs.start(items, "pdf", target, origin="auto",
+                         operador=AUTO_OPERADOR, code_lote=_auto_batch_code())
         with _lock:
             _status["last_run"] = int(now_ts)
         sheets = -(-len(items) // per)   # techo
