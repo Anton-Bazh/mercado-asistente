@@ -67,11 +67,18 @@ DEFAULT_CONTACT = "735 252 7148"
 LOW_MARKUP = 5
 
 # --- Zonas del estampado (fracciones del rect de la etiqueta) ----------------
-# ⚠ CALIBRAR con etiqueta real de la API antes de la Fase 3 (ver guía §5 F2).
+# Calibradas el 09-jul-2026 contra la guía REAL del envío 47484497514
+# (plantilla ML MX con talón de contenido integrado, 268×545 pt) y la
+# referencia visual del Extractor (etiqueta DOMESKA):
+#   y 0.229-0.245 Remitente · ~0.39-0.535 código de barras+dígitos ·
+#   0.576-0.683 sigla grande (STR1) · 0.736-0.755 fecha/CP ·
+#   0.833-0.962 destinatario. El logo va en el hueco bajo los dígitos del
+#   código (como el wordmark del Extractor) y el contacto en el hueco entre
+#   fecha/CP y el destinatario. Validar con la primera reimpresión real.
 Z_DOT = (0.08, 0.08)          # centro del punto rojo (esquina sup. izquierda)
-Z_FOLIO = (0.86, 0.24)        # folio (centrado en x)
-Z_LOGO = (0.54, 0.52)         # centro-x del logo · y = base (borde inferior)
-Z_CONTACT = (0.54, 0.60)      # "Número de Contacto" (centrado)
+Z_FOLIO = (0.86, 0.24)        # folio (centrado en x), a la altura del Remitente
+Z_LOGO = (0.45, 0.574)        # centro-x del logo · y = base (sobre la sigla)
+Z_CONTACT = (0.50, 0.772)     # "Número de Contacto" (centrado)
 
 # Tamaños en puntos (el Extractor usaba px de canvas a 2×: px/2 = pt).
 S_FOLIO = 21.0
@@ -83,6 +90,10 @@ S_BATCH = 10.0
 R_DOT = 10.0
 W_LOGO = {"INMATMEX": 90.0, "MTM": 90.0}                   # ancho especial
 W_LOGO_DEF = 60.0
+# Tope de ALTO del logo: el hueco entre los dígitos del código de barras y la
+# sigla grande mide ~21 pt en la guía real — un logo cuadrado (SUPER OFERTAS)
+# a 60 pt de alto invadía el código de barras y arruinaría el escaneo.
+H_LOGO_MAX = 20.0
 
 
 # Forma compacta (sin espacios) → clave canónica de LOGO_FILES/CONTACTS.
@@ -193,17 +204,23 @@ def _stamp_page(page: fitz.Page, *, folio: int, company: str,
     size_emp = S_EMPRESA.get(company, S_EMPRESA_DEF)
     _center_text(page, _txt(company), fx, fy + size_emp + 2, size_emp, rgb, bold=True)
 
-    # Logo centrado (base en y) + contacto debajo.
+    # Logo (base en y, alto acotado para no invadir el código de barras).
     lx = r.x0 + w * Z_LOGO[0]
     ly = r.y0 + h * Z_LOGO[1]
     if logo is not None:
         lw = W_LOGO.get(company, W_LOGO_DEF)
         lh = lw * logo.height / logo.width
+        if lh > H_LOGO_MAX:
+            lw *= H_LOGO_MAX / lh
+            lh = H_LOGO_MAX
         page.insert_image(fitz.Rect(lx - lw / 2, ly - lh, lx + lw / 2, ly),
                           pixmap=logo, keep_proportion=True)
+
+    # Contacto en el hueco entre fecha/CP y el bloque del destinatario.
+    cx = r.x0 + w * Z_CONTACT[0]
     cy = r.y0 + h * Z_CONTACT[1]
-    _center_text(page, "Numero de Contacto", lx, cy, S_CONTACT_LABEL, (0, 0, 0))
-    _center_text(page, contact, lx, cy + S_CONTACT_NUM + 3, S_CONTACT_NUM,
+    _center_text(page, "Numero de Contacto", cx, cy, S_CONTACT_LABEL, (0, 0, 0))
+    _center_text(page, contact, cx, cy + S_CONTACT_NUM + 3, S_CONTACT_NUM,
                  (0, 0, 0), bold=True)
 
     # Código de lote al pie, centrado (identificador del batch en papel).
