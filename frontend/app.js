@@ -13,6 +13,7 @@ const state = {
             token_expires_in: null },
   format: localStorage.getItem('ef_format') || 'pdf',
   printer: localStorage.getItem('ef_printer') || '',
+  operador: localStorage.getItem('ef_operador') || '',   // quién imprime (unificación con el Extractor)
   printers: [],
   showOffPrinters: false, // Dispositivos: ver las no disponibles (solo administrar)
   cups: false,
@@ -54,8 +55,14 @@ async function api(path, options = {}) {
   let data = null;
   try { data = await resp.json(); } catch (_) {}
   if (!resp.ok) {
-    const err = new Error((data && data.detail) || resp.statusText);
+    // detail puede ser texto (la mayoría de los errores) u objeto estructurado
+    // (p. ej. el 409 de saldo negativo: {message, items}) — se preserva tal
+    // cual en err.detail para que el llamador pueda distinguirlo sin perder
+    // los datos (new Error() solo admite un string en el mensaje).
+    const detail = data && data.detail;
+    const err = new Error((typeof detail === 'string' && detail) || resp.statusText);
     err.status = resp.status;
+    err.detail = detail;
     throw err;
   }
   return data;
@@ -342,7 +349,8 @@ async function printOne(order, fmt) {
 }
 
 // Arranca un lote en segundo plano (motor seguro hoja por hoja) y sigue su progreso.
-async function startBatch(orders, labelWhat) {
+// confirmed: reintento tras el modal de saldo negativo (saldo_negativo_confirmado=1).
+async function startBatch(orders, labelWhat, confirmed = false) {
   if (!orders.length) { showBanner('No hay ventas para imprimir.', 'info'); return; }
   const fmt = state.format;
   if (!canServerPrint()) {
@@ -351,19 +359,61 @@ async function startBatch(orders, labelWhat) {
     log('WARN', 'impresion', `Sin impresora: ${labelWhat} (${orders.length}) abierto en el navegador.`);
     return;
   }
+  // Unificación con el Extractor: el operador es obligatorio para registrar
+  // el lote (backend lo valida contra el padrón; esto solo evita el viaje
+  // redondo si quedó vacío).
+  const operador = (state.operador || '').trim();
+  if (!operador) {
+    showBanner('Escribe quién imprime («Imprimió», arriba) antes de continuar.', 'error');
+    $('op-operador').focus();
+    return;
+  }
   try {
     const fd = new FormData();
     fd.append('ids', orders.map(o => o.shipment_id).join(','));
     fd.append('format', fmt); fd.append('printer', state.printer);
     fd.append('meta', buildMeta(orders));
+    fd.append('operador', operador);
+    fd.append('saldo_negativo_confirmado', confirmed ? '1' : '0');
     const r = await api('/api/print-batch', { method:'POST', body:fd });
-    showBanner(`Imprimiendo ${orders.length} etiqueta(s) en «${r.printer}»…`, 'info');
+    showBanner(`Imprimiendo ${orders.length} etiqueta(s) en «${r.printer}» · lote ${r.code_lote}…`, 'info');
     pollBatch();
   } catch (e) {
-    if (e.status === 409) showBanner(e.message, 'error');
-    else showCritical(`${labelWhat}: ${e.message}`);
+    // 409 de saldo negativo: detail = {message, items}; distinto del 409 de
+    // "ya hay un lote imprimiéndose" (detail = string) — ver api().
+    if (e.status === 409 && e.detail && Array.isArray(e.detail.items)) {
+      openLowMarginModal(e.detail.items, () => startBatch(orders, labelWhat, true));
+    } else if (e.status === 409) {
+      showBanner(e.message, 'error');
+    } else {
+      showCritical(`${labelWhat}: ${e.message}`);
+    }
   }
 }
+
+// Modal de saldo negativo (gate de auditoría, unificación con el Extractor):
+// cruza los envíos afectados (solo shipment_id/pack_id/markup, del backend)
+// contra state.orders (ya cargados en la Cola) para mostrar producto/tienda.
+let _lowMarginConfirm = null;
+function openLowMarginModal(items, onConfirm) {
+  const byId = new Map(state.orders.map(o => [String(o.shipment_id), o]));
+  $('lowmargin-sub').textContent =
+    `${items.length} venta${items.length === 1 ? '' : 's'} con saldo negativo — requiere confirmar antes de imprimir`;
+  $('lowmargin-body').innerHTML = items.map(it => {
+    const o = byId.get(String(it.shipment_id));
+    const label = (o && (o.product_summary || o.buyer_name)) || `envío #${it.shipment_id}`;
+    const store = o && o.account_name ? ` · ${esc(o.account_name)}` : '';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--line);font-size:12.5px">
+      <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}${store}</span>
+      <span style="font-family:var(--mono);color:var(--err);flex:0 0 auto;font-weight:600">markup ${esc(it.markup)}</span>
+    </div>`;
+  }).join('');
+  $('lowmargin-ack').checked = false;
+  $('lowmargin-confirm').disabled = true;
+  _lowMarginConfirm = onConfirm;
+  $('lowmargin-overlay').style.display = 'flex';
+}
+function hideLowMarginModal() { $('lowmargin-overlay').style.display = 'none'; _lowMarginConfirm = null; }
 
 function printSelected() {
   const sel = selectedList();
@@ -437,6 +487,13 @@ function renderBatch() {
       ? 'AUTOMÁTICO' + (state.auto && state.auto.mode_now ? ' · ' +
           ({ ahorro: 'AHORRO', forzar: 'VACIADO', pausa: 'PAUSA' }[state.auto.mode_now] || '') : '')
       : 'MANUAL';
+  }
+  // código de lote (unificación con el Extractor) — mismo identificador que
+  // queda en etiquetas_i/v_code, útil para ubicar el lote después.
+  const cl = $('batch-code-lote');
+  if (cl) {
+    cl.style.display = s.code_lote ? 'inline-block' : 'none';
+    cl.textContent = s.code_lote ? `lote ${s.code_lote}` : '';
   }
   // qué etiqueta está saliendo ahora (con su tienda)
   const nowEl = $('batch-now');
@@ -702,6 +759,24 @@ function renderCola() {
   renderBatch();
   renderRiskAlert();
   updateLayoutHint();
+  updateFolioHint();
+}
+// Folio sugerido (unificación con el Extractor): solo tiene sentido con UNA
+// tienda filtrada — el folio es consecutivo POR EMPRESA (D1), así que con
+// "Todas" seleccionadas no hay una única organización que sugerir.
+// Informativo nada más: el folio real lo asigna el motor de lotes al imprimir.
+async function updateFolioHint() {
+  const hint = $('op-folio-hint'); if (!hint) return;
+  if (state.storeFilter === 'all') { hint.style.display = 'none'; updateFolioHint._for = null; return; }
+  if (updateFolioHint._for === state.storeFilter) return;   // ya consultado
+  updateFolioHint._for = state.storeFilter;
+  const acc = (state.accountsMeta || []).find(a => String(a.id) === String(state.storeFilter));
+  if (!acc) { hint.style.display = 'none'; return; }
+  try {
+    const d = await api(`/api/enrich/next-folio?organization=${encodeURIComponent(acc.name)}`);
+    hint.textContent = `folio sugerido: ${d.next_folio} (${d.organization})`;
+    hint.style.display = 'inline';
+  } catch { hint.style.display = 'none'; }
 }
 function renderRiskAlert() {
   const el = $('risk-alert'); if (!el) return;
@@ -1355,6 +1430,14 @@ function init() {
   $('btn-reload').addEventListener('click', () => loadOrders({ manual: true }));
   $('btn-print-pending').addEventListener('click', printAllToday);
   $('btn-print-selected').addEventListener('click', printSelected);
+  // operador que imprime (unificación con el Extractor): se recuerda entre
+  // sesiones, igual que impresora/formato — evita retipearlo en cada lote.
+  $('op-operador').value = state.operador;
+  $('op-operador').addEventListener('input', e => {
+    state.operador = e.target.value;
+    if (state.operador.trim()) localStorage.setItem('ef_operador', state.operador);
+    else localStorage.removeItem('ef_operador');
+  });
   $('btn-select-all').addEventListener('click', () => {
     todayList().forEach(o => state.selected.add(String(o.shipment_id)));
     renderCola();
@@ -1852,6 +1935,16 @@ function init() {
   $('stamp-overlay').addEventListener('click', e => { if (e.target === $('stamp-overlay')) hideStamp(); });
   $('diag-close').addEventListener('click', hideDiag);
   $('diag-overlay').addEventListener('click', e => { if (e.target === $('diag-overlay')) hideDiag(); });
+
+  // modal de saldo negativo (gate de auditoría)
+  $('lowmargin-ack').addEventListener('change', e => { $('lowmargin-confirm').disabled = !e.target.checked; });
+  $('lowmargin-cancel').addEventListener('click', hideLowMarginModal);
+  $('lowmargin-confirm').addEventListener('click', () => {
+    const cb = _lowMarginConfirm;
+    hideLowMarginModal();
+    if (cb) cb();
+  });
+  $('lowmargin-overlay').addEventListener('click', e => { if (e.target === $('lowmargin-overlay')) hideLowMarginModal(); });
   $('side-foot').addEventListener('click', () => showStamp({ msg: 'EtiquetaFlow · ' + location.host, critical: false }));
 
   // arranque
