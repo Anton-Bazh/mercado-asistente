@@ -85,13 +85,33 @@ W_LOGO = {"INMATMEX": 90.0, "MTM": 90.0}                   # ancho especial
 W_LOGO_DEF = 60.0
 
 
+# Forma compacta (sin espacios) → clave canónica de LOGO_FILES/CONTACTS.
+# Cubre los nombres de cuenta tal como se capturan en EtiquetaFlow, que no
+# coinciden con las claves históricas del Extractor (bug de la prueba real
+# del 09-jul: «SUPEROFERTASPUNTOCOM» salía sin logo ni contacto, en silencio).
+_COMPACT_KEYS = {k.replace(" ", ""): k for k in LOGO_FILES}
+
+
 def normalize_company(name: str | None) -> str:
-    """Misma normalización que el Extractor: TAL* → TAL, DOMESKA → DO MESKA."""
+    """Nombre de cuenta/tienda → clave canónica de LOGO_FILES/CONTACTS.
+
+    1º compara la forma compacta (sin espacios) contra las claves conocidas,
+    aceptando prefijo («SUPEROFERTASPUNTOCOM» → «SUPER OFERTAS»); después
+    aplica las reglas históricas del Extractor (TAL* → TAL, DOMESKA →
+    DO MESKA). Si nada coincide, devuelve el nombre tal cual (y quien pinte
+    el logo avisará que no está mapeado).
+    """
     key = (name or "").strip().upper()
+    compact = "".join(ch for ch in key if ch.isalnum())
+    if compact in _COMPACT_KEYS:
+        return _COMPACT_KEYS[compact]
+    for ck, canonical in _COMPACT_KEYS.items():
+        if len(ck) >= 3 and compact.startswith(ck):
+            return canonical
     if "TAL" in key:
-        key = "TAL"
+        return "TAL"
     if key == "DOMESKA":
-        key = "DO MESKA"
+        return "DO MESKA"
     return key
 
 
@@ -215,6 +235,12 @@ def _logo_pixmap(company: str):
     """Pixmap del logo de la empresa (cacheado); None si no hay archivo."""
     if company not in _LOGO_CACHE:
         fname = LOGO_FILES.get(company)
+        if not fname:
+            # Antes fallaba EN SILENCIO (prueba real 09-jul): sin este aviso,
+            # una cuenta no mapeada imprime sin logo y nadie se entera.
+            log.warning("Empresa «%s» no está mapeada en LOGO_FILES/CONTACTS: "
+                        "la etiqueta sale SIN logo y con contacto genérico. "
+                        "Agrega el nombre real de la cuenta al mapeo.", company)
         path = ASSETS / fname if fname else None
         try:
             _LOGO_CACHE[company] = fitz.Pixmap(str(path)) if path and path.exists() else None
