@@ -491,9 +491,12 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
                 # ML: se estampa directo sobre la etiqueta (ya trae el
                 # producto nativo, no usa talón).
                 try:
+                    # folio_step=0: un envío = UN folio aunque el PDF traiga
+                    # más páginas (el folio impreso debe = el registrado).
                     pdf = label_enrich.enrich(
                         pdf, folio=reg["folio"], company=reg["organization"],
-                        batch_code=_job.get("code_lote") or "", markup=reg.get("markup"))
+                        batch_code=_job.get("code_lote") or "", markup=reg.get("markup"),
+                        folio_step=0)
                 except Exception:
                     log.warning("Lote %s: no se pudo estampar el envío %s (sale sin "
                                 "estampado; el registro sigue intacto).",

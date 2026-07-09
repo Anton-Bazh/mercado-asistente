@@ -191,6 +191,7 @@ class MLProvider(Provider):
         content = resp.content
         if fmt == "zpl":
             return content, "text/plain; charset=utf-8", f"etiqueta_{shipment_id}.zpl"
+        content = _strip_content_pages(content)
         _remember_label_size(content)
         return content, "application/pdf", f"etiqueta_{shipment_id}.pdf"
 
@@ -274,6 +275,52 @@ def _normalize(order: dict, shipment: dict) -> dict:
         # imprimir ni separar; se muestra en «Próximos» como informativa.
         "printable": shipment.get("status") == "ready_to_ship",
     }
+
+
+def _strip_content_pages(pdf_bytes: bytes) -> bytes:
+    """Descarta las hojas "Identificación/Producto" que ML a veces adjunta.
+
+    La API puede devolver la guía acompañada de una hoja de declaración de
+    contenido en el mismo PDF (verificado con el envío 47484497514, 09-jul-2026:
+    página 0 = guía A4 apaisada, página 1 = hoja "Despacha tu producto cuanto
+    antes…"). Esa hoja rompía el acomodo n-up, el cuadre PDF↔API y el estampado
+    (asumen 1 página = 1 etiqueta). Decisión de Antonio (09-jul): se descarta —
+    la guía ya trae producto/SKU impresos de forma nativa.
+
+    Se identifica por texto, no por posición ni tamaño. Si el filtro dejara el
+    PDF vacío (formato inesperado), se devuelve el original intacto: nunca se
+    pierde una etiqueta por esta limpieza.
+    """
+    try:
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception:
+        return pdf_bytes
+    try:
+        if doc.page_count <= 1:
+            return pdf_bytes
+        keep = []
+        for i in range(doc.page_count):
+            text = doc.load_page(i).get_text().lower()
+            # La hoja de contenido dice "Despacha tu producto…" y no trae
+            # remitente; la guía siempre trae el bloque de remitente.
+            if "despacha tu producto" in text and "remitente" not in text:
+                continue
+            keep.append(i)
+        if not keep or len(keep) == doc.page_count:
+            return pdf_bytes
+        out = fitz.open()
+        try:
+            for i in keep:
+                out.insert_pdf(doc, from_page=i, to_page=i)
+            result = out.tobytes()
+        finally:
+            out.close()
+        log.info("Etiqueta con %d hoja(s) de contenido descartada(s); quedan "
+                 "%d página(s) de guía.", doc.page_count - len(keep), len(keep))
+        return result
+    finally:
+        doc.close()
 
 
 def _remember_label_size(pdf_bytes: bytes) -> None:

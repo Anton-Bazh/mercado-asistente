@@ -102,16 +102,18 @@ def day_color(dt: datetime | None = None) -> str:
 
 def enrich(pdf_bytes: bytes, *, folio: int, company: str,
            batch_code: str, markup: float | None = None,
-           color: str | None = None) -> bytes:
+           color: str | None = None, folio_step: int = 1) -> bytes:
     """Estampa la etiqueta (todas sus páginas, normalmente una).
 
     folio: consecutivo de la etiqueta física · company: tienda/empresa (se
     normaliza) · batch_code: código de lote (pie) · markup: si ≤ 5 dibuja el
     punto rojo · color: hex del folio (por defecto, el del día).
 
-    En producción cada envío llega en su propio PDF (1 página = 1 folio); si
-    el PDF trae varias páginas (lote de muestra), el folio incrementa por
-    página para previsualizar el consecutivo.
+    folio_step: cuánto avanza el folio por página. 1 (default) para las vistas
+    previas (una muestra por página simula el consecutivo del lote); el motor
+    de impresión pasa 0 — un envío es UN folio, aunque su PDF traiga más de
+    una página, para que el folio impreso siempre coincida con el registrado
+    (bug de la prueba real del 09-jul: se estampó N y N+1 en el mismo envío).
     """
     key = normalize_company(company)
     rgb = _hex_rgb(color or day_color())
@@ -121,7 +123,7 @@ def enrich(pdf_bytes: bytes, *, folio: int, company: str,
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         for i, page in enumerate(doc):
-            _stamp_page(page, folio=folio + i, company=key, rgb=rgb,
+            _stamp_page(page, folio=folio + i * folio_step, company=key, rgb=rgb,
                         contact=contact, logo=logo, batch_code=batch_code,
                         low=(markup is not None and markup <= LOW_MARKUP))
         return doc.tobytes()
@@ -150,7 +152,13 @@ def stub_stamp(*, folio: int, company: str, batch_code: str,
 def _stamp_page(page: fitz.Page, *, folio: int, company: str,
                 rgb: tuple, contact: str, logo, batch_code: str,
                 low: bool) -> None:
-    r = page.rect
+    # Las zonas Z_* son fracciones DE LA ETIQUETA, no de la página: la API
+    # entrega la guía dibujada sobre una página más grande (verificado
+    # 09-jul: guía de ~268×545 pt sobre A4 apaisada) y estampar contra la
+    # página completa tiraba el folio/lote a las esquinas del papel y, de
+    # paso, inflaba el bbox que mide el acomodo n-up (per_sheet caía a 1).
+    import label_layout
+    r = label_layout._label_rect(page)
     w, h = r.width, r.height
 
     # Punto rojo: saldo negativo en venta (alerta física para empaque/despacho).
