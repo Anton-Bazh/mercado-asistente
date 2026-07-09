@@ -99,8 +99,9 @@ def start(items: list[dict], fmt: str, printer: str, origin: str = "manual",
 
     origin: 'manual' (persona) o 'auto' (scheduler por reglas de horario).
     operador/code_lote: identifican el registro de etiquetas (unificación con
-    el Extractor, Fase 3) — solo aplica a envíos de Mercado Libre en formato
-    PDF; Walmart/TikTok siguen imprimiendo sin registrar (Cambio 3.2 pendiente).
+    el Extractor) — aplica a los 3 marketplaces en formato PDF. Walmart/TikTok
+    se registran sin markup/auditoría (sin fuente de saldo todavía); el
+    estampado va dentro del talón, no sobre la guía (Cambio 3.2).
     """
     global _job, _thread
     with _lock:
@@ -213,47 +214,38 @@ def _record(item: dict, fmt: str, status_val: str, printer: str,
 
 
 def _registration_context(item: dict, fmt: str) -> dict | None:
-    """Datos para registrar el envío (unificación con el Extractor, Fase 3).
+    """Datos para registrar el envío (unificación con el Extractor): folio +
+    organización + markup (si hay fuente) para los 3 marketplaces en PDF.
 
-    None si no aplica: alcance de las fases 1-3 es SOLO Mercado Libre en PDF
-    (Walmart/TikTok siguen imprimiendo sin registrar hasta el Cambio 3.2), o si
-    el pedido no está en caché (p. ej. tras un reinicio del servidor) — nunca
-    bloquea la impresión, solo se pierde el registro de esa etiqueta.
+    El folio se asigna AQUÍ (no después de pedir la etiqueta): Walmart/TikTok
+    lo necesitan listo antes de llamar a orders_hub.get_label, para poder
+    pasarlo como `stamp` y que quede dentro del talón (Cambio 3.2); Mercado
+    Libre lo usa después, para estampar directo sobre la etiqueta.
+
+    None si no aplica: otro formato, o el pedido no está en caché (p. ej. tras
+    un reinicio del servidor) — nunca bloquea la impresión, solo se pierde el
+    registro de esa etiqueta.
     """
     if fmt != "pdf":
         return None
     acc = storage.get_account(item.get("account_id") or "")
-    if not acc or acc.get("provider") != "ml":
+    if not acc:
         return None
     info = orders_hub.order_info(item["shipment_id"])
     if not info:
         log.debug("Lote: envío %s sin datos de pedido en caché; se imprime "
                   "SIN registrar en etiquetas_i.", item["shipment_id"])
         return None
+    provider = acc.get("provider")
     pack_id = info.get("pack_id")
+    # Markups (Supabase/ml_sales): solo existen para Mercado Libre hoy —
+    # Walmart/TikTok quedan con markup=None (sin punto rojo, sin auditoría).
     markup_info = _job["markups"].get(str(pack_id), {}) if pack_id else {}
     organization = label_enrich.normalize_company(
         markup_info.get("tienda") or item.get("account_name"))
     return {"info": info, "pack_id": pack_id, "markup": markup_info.get("markup"),
-            "organization": organization}
-
-
-def _stub_stamp_for(item: dict, fmt: str) -> dict | None:
-    """Bloque de estampado del talón removible para Walmart/TikTok (Cambio
-    3.2) — Mercado Libre no pasa por aquí: su etiqueta ya trae el estampado
-    directo (_registration_context + label_enrich.enrich). Usa el mismo
-    contador de folio por tienda que ML (D1); sin punto rojo porque Walmart/
-    TikTok aún no tienen una fuente de saldo/markup (nota de Antonio, guía de
-    unificación §Cambio 3.2) — se activará cuando se defina esa fuente."""
-    if fmt != "pdf":
-        return None
-    acc = storage.get_account(item.get("account_id") or "")
-    if not acc or acc.get("provider") not in ("walmart", "tiktok"):
-        return None
-    organization = label_enrich.normalize_company(item.get("account_name"))
-    return label_enrich.stub_stamp(
-        folio=_next_folio(organization), company=organization,
-        batch_code=_job.get("code_lote") or "")
+            "organization": organization, "provider": provider,
+            "folio": _next_folio(organization)}
 
 
 def _next_folio(organization: str) -> int:
@@ -284,7 +276,7 @@ def _register_confirmed(b_items: list[dict], job_id: str) -> None:
                 "product": p.get("title"), "sku": p.get("sku"),
                 "quantity": p.get("quantity"), "deli_date": info.get("delivery_estimate"),
                 "organization": reg["organization"],
-                "sou_file": f"API:ml lote {job_id}",
+                "sou_file": f"API:{reg.get('provider')} lote {job_id}",
                 "personal_inc": _job.get("operador") or "",
                 "hour": now_iso, "imp_date": now_iso,
                 "client": receiver.get("name"), "cp": receiver.get("zip"),
@@ -292,17 +284,22 @@ def _register_confirmed(b_items: list[dict], job_id: str) -> None:
                 "folio": reg.get("folio"), "client_name": receiver.get("name"),
                 "code_i": _job.get("code_lote") or "", "pack_id": reg.get("pack_id"),
             })
-        with _lock:
-            folio = reg.get("folio")
-            if folio is not None:
-                if _job["folio_min"] is None or folio < _job["folio_min"]:
-                    _job["folio_min"] = folio
-                if _job["folio_max"] is None or folio > _job["folio_max"]:
-                    _job["folio_max"] = folio
-            if reg.get("markup") is not None and reg["markup"] <= label_enrich.LOW_MARKUP:
-                _job["audit_needed"] = True
-                if _job["audit_venta_id"] is None:
-                    _job["audit_venta_id"] = reg.get("pack_id")
+        # Rango de folios y gate de auditoría: exclusivos de Mercado Libre —
+        # es el único marketplace con fuente de saldo (ml_sales/markup) hoy;
+        # si se mezclaran folios de otras tiendas/organizaciones aquí, el
+        # rango que reporta la auditoría de saldo negativo saldría sucio.
+        if reg.get("provider") == "ml":
+            with _lock:
+                folio = reg.get("folio")
+                if folio is not None:
+                    if _job["folio_min"] is None or folio < _job["folio_min"]:
+                        _job["folio_min"] = folio
+                    if _job["folio_max"] is None or folio > _job["folio_max"]:
+                        _job["folio_max"] = folio
+                if reg.get("markup") is not None and reg["markup"] <= label_enrich.LOW_MARKUP:
+                    _job["audit_needed"] = True
+                    if _job["audit_venta_id"] is None:
+                        _job["audit_venta_id"] = reg.get("pack_id")
 
     if rows:
         try:
@@ -453,7 +450,18 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
 
         _set(item, "printing")
         _msg(f"Pidiendo etiqueta {idx + 1} de {len(items)}…")
-        stamp = _stub_stamp_for(item, fmt)
+
+        # Registro (unificación con el Extractor): folio/organización se
+        # calculan ANTES de pedir la etiqueta — Walmart/TikTok lo necesitan
+        # listo para pasarlo como `stamp` y que quede dentro del talón
+        # (Cambio 3.2, nunca sobre la guía del transportista).
+        reg = _registration_context(item, fmt)
+        stamp = None
+        if reg is not None and reg["provider"] != "ml":
+            stamp = label_enrich.stub_stamp(
+                folio=reg["folio"], company=reg["organization"],
+                batch_code=_job.get("code_lote") or "", markup=reg.get("markup"))
+
         try:
             pdf, _ct, _fn = orders_hub.get_label(item.get("account_id"), item["shipment_id"],
                                                  fmt, stamp=stamp)
@@ -464,8 +472,8 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
             _record(item, fmt, "blocked", printer, None, f"Error al pedir la etiqueta: {exc}")
             for rest in items[idx + 1:]:
                 _set(rest, "blocked")
-                _record(rest, fmt, "blocked", printer, None, "Detenido tras error de ML.")
-            _msg(f"Error al pedir la etiqueta a Mercado Libre: {exc}")
+                _record(rest, fmt, "blocked", printer, None, "Detenido tras error al pedir una etiqueta.")
+            _msg(f"Error al pedir la etiqueta: {exc}")
             log.error("Lote %s: %s error al pedir la etiqueta del envío %s: %s — "
                       "lote detenido, %d etiqueta(s) bloqueadas a salvo",
                       job_id,
@@ -474,21 +482,24 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
             _finish(job_id)
             return
 
-        # Cuadre PDF↔API + estampado + folio (unificación con el Extractor,
-        # Fase 3) — solo Mercado Libre en PDF; nunca bloquea la impresión.
-        reg = _registration_context(item, fmt)
+        # Cuadre PDF↔API (barcode físico impreso, requisito de Antonio
+        # 07-jul) + estampado — nunca bloquea la impresión si algo falla.
         if reg is not None:
-            verify_res = label_verify.verify(pdf, "ml", reg["info"].get("tracking_number"))
+            verify_res = label_verify.verify(pdf, reg["provider"], reg["info"].get("tracking_number"))
             reg.update(verify_res)
-            reg["folio"] = _next_folio(reg["organization"])
-            try:
-                pdf = label_enrich.enrich(
-                    pdf, folio=reg["folio"], company=reg["organization"],
-                    batch_code=_job.get("code_lote") or "", markup=reg.get("markup"))
-            except Exception:
-                log.warning("Lote %s: no se pudo estampar el envío %s (sale sin "
-                            "estampado; el registro sigue intacto).",
-                            job_id, item["shipment_id"], exc_info=True)
+            if reg["provider"] == "ml":
+                # ML: se estampa directo sobre la etiqueta (ya trae el
+                # producto nativo, no usa talón).
+                try:
+                    pdf = label_enrich.enrich(
+                        pdf, folio=reg["folio"], company=reg["organization"],
+                        batch_code=_job.get("code_lote") or "", markup=reg.get("markup"))
+                except Exception:
+                    log.warning("Lote %s: no se pudo estampar el envío %s (sale sin "
+                                "estampado; el registro sigue intacto).",
+                                job_id, item["shipment_id"], exc_info=True)
+            # Walmart/TikTok: el estampado ya se aplicó arriba, dentro del
+            # talón, vía `stamp` — no se vuelve a tocar la guía aquí.
             item["_reg"] = reg
             with _lock:
                 if not _job["first_code"] and verify_res.get("code"):
