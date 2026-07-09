@@ -487,6 +487,19 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
         if reg is not None:
             verify_res = label_verify.verify(pdf, reg["provider"], reg["info"].get("tracking_number"))
             reg.update(verify_res)
+            # H5: la API de ML entrega receiver_address vacío — el destinatario
+            # se lee de la propia etiqueta (como hacía el Extractor) y se
+            # persiste para que las reimpresiones futuras ya lo tengan.
+            if reg["provider"] == "ml" and not (reg["info"].get("receiver") or {}).get("name"):
+                parsed = label_verify.extract_receiver(pdf)
+                if parsed:
+                    recv = dict(reg["info"].get("receiver") or {})
+                    recv.update({k: v for k, v in parsed.items() if v})
+                    reg["info"]["receiver"] = recv
+                    try:
+                        storage.set_order_info(item["shipment_id"], reg["info"])
+                    except Exception:
+                        pass
             if reg["provider"] == "ml":
                 # ML: se estampa directo sobre la etiqueta (ya trae el
                 # producto nativo, no usa talón).

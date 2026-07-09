@@ -102,6 +102,62 @@ def _best_candidate(candidates: list[str], provider: str) -> str | None:
     return max(candidates, key=len)
 
 
+def extract_receiver(pdf_bytes: bytes) -> dict:
+    """Destinatario leído de la propia etiqueta (respaldo del hueco H5).
+
+    La API de ML entrega `receiver_address` VACÍO (verificado 09-jul-2026 con
+    un envío real: `{}`), pero la etiqueta impresa siempre trae el bloque del
+    destinatario. Igual que hacía el Extractor (leía del PDF), se parsea:
+
+        Jose Manuel Cortinas Navarro          ← nombre (a veces con (NICK) al lado)
+        (JOSEMANUELCORTINASNAVARRO)           ← nickname (línea aparte a veces)
+        Domicilio: Privada Karina SN, Torreón, Coahuila
+        CP: 27013
+
+    Devuelve {name, zip, city, state} con lo que se haya podido leer; {} si
+    el PDF no trae el bloque. Nunca lanza.
+    """
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception:
+        return {}
+    try:
+        if doc.page_count == 0:
+            return {}
+        lines = [ln.strip() for ln in doc.load_page(0).get_text().splitlines()
+                 if ln.strip()]
+    except Exception:
+        return {}
+    finally:
+        doc.close()
+
+    dom_idx = next((i for i, ln in enumerate(lines)
+                    if ln.lower().startswith("domicilio:")), None)
+    if dom_idx is None:
+        return {}
+    out: dict = {}
+    # Nombre: hacia atrás desde Domicilio, saltando la línea "(NICKNAME)".
+    j = dom_idx - 1
+    if j >= 0 and re.fullmatch(r"\(.+\)", lines[j]):
+        j -= 1
+    if j >= 0:
+        name = re.sub(r"\s*\(.*\)\s*$", "", lines[j]).strip()
+        if name:
+            out["name"] = name
+    # Domicilio: "calle..., municipio, estado" → las dos últimas partes.
+    parts = [p.strip() for p in lines[dom_idx].split(":", 1)[1].split(",")
+             if p.strip()]
+    if len(parts) >= 2:
+        out["city"], out["state"] = parts[-2], parts[-1]
+    # CP: la primera línea "CP: NNNNN" justo después del Domicilio.
+    for ln in lines[dom_idx + 1:dom_idx + 4]:
+        m = re.match(r"CP:\s*(\d{4,5})", ln)
+        if m:
+            out["zip"] = int(m.group(1))
+            break
+    return out
+
+
 # --- helpers -------------------------------------------------------------------
 def _digits(s: str | None) -> str:
     return re.sub(r"\D", "", str(s)) if s else ""

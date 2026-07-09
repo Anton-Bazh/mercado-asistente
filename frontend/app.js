@@ -130,6 +130,9 @@ function selectedList() { return todayList().filter(o => state.selected.has(Stri
 // Pools sin filtro de tienda, para los contadores por cuenta de cada columna.
 function poolAllStores() { return state.orders.filter(o => o.pending && !o.multi_unit); }
 function productSummary(o) {
+  // Reimpresiones: el resumen ya viene formateado del historial — usarlo tal
+  // cual (re-formatearlo acumulaba un « x1» en cada reimpresión).
+  if (o.product_summary) return o.product_summary;
   const p = (o.products && o.products[0]) || null;
   if (!p) return '—';
   const extra = o.products.length > 1 ? ` +${o.products.length - 1}` : '';
@@ -1454,6 +1457,7 @@ function init() {
   $('col-done').addEventListener('click', async e => {
     const b = e.target.closest('[data-act="reprint-done"]'); if (!b) return;
     await printOne({ shipment_id: b.dataset.sid, order_id: b.dataset.oid, buyer_name: b.dataset.buyer,
+                     product_summary: b.dataset.prod || '',
                      account_id: b.dataset.aid || '', account_name: b.dataset.aname || '',
                      products: b.dataset.prod ? [{ title: b.dataset.prod, quantity: 1 }] : [] }, b.dataset.fmt);
   });
@@ -1589,7 +1593,7 @@ function init() {
   $('hist-rows').addEventListener('click', async e => {
     const b = e.target.closest('[data-act="reprint"]'); if (!b) return;
     const order = { shipment_id: b.dataset.sid, order_id: b.dataset.oid,
-                    buyer_name: b.dataset.buyer,
+                    buyer_name: b.dataset.buyer, product_summary: b.dataset.prod || '',
                     account_id: b.dataset.aid || '', account_name: b.dataset.aname || '',
                     products: b.dataset.prod ? [{ title: b.dataset.prod, quantity: 1 }] : [] };
     await printOne(order, b.dataset.fmt);

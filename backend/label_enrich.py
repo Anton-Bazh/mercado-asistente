@@ -75,9 +75,13 @@ LOW_MARKUP = 5
 #   0.833-0.962 destinatario. El logo va en el hueco bajo los dígitos del
 #   código (como el wordmark del Extractor) y el contacto en el hueco entre
 #   fecha/CP y el destinatario. Validar con la primera reimpresión real.
+# Ajustes de Antonio sobre la primera impresión estampada (09-jul, foto):
+# folio más abajo (dentro del bloque del Remitente) y logo MÁS GRANDE — se
+# movió al hueco libre a la derecha de los dígitos del código de barras
+# (x 0.60-0.95 · y 0.535-0.60, antes del "23:00") para poder crecerlo.
 Z_DOT = (0.08, 0.08)          # centro del punto rojo (esquina sup. izquierda)
-Z_FOLIO = (0.86, 0.24)        # folio (centrado en x), a la altura del Remitente
-Z_LOGO = (0.45, 0.574)        # centro-x del logo · y = base (sobre la sigla)
+Z_FOLIO = (0.86, 0.29)        # folio (centrado en x), dentro del bloque Remitente
+Z_LOGO = (0.78, 0.60)         # centro-x del logo · y = base (junto a los dígitos)
 Z_CONTACT = (0.50, 0.772)     # "Número de Contacto" (centrado)
 
 # Tamaños en puntos (el Extractor usaba px de canvas a 2×: px/2 = pt).
@@ -90,10 +94,10 @@ S_BATCH = 10.0
 R_DOT = 10.0
 W_LOGO = {"INMATMEX": 90.0, "MTM": 90.0}                   # ancho especial
 W_LOGO_DEF = 60.0
-# Tope de ALTO del logo: el hueco entre los dígitos del código de barras y la
-# sigla grande mide ~21 pt en la guía real — un logo cuadrado (SUPER OFERTAS)
-# a 60 pt de alto invadía el código de barras y arruinaría el escaneo.
-H_LOGO_MAX = 20.0
+# Tope de ALTO del logo: en su hueco (derecha de los dígitos del código)
+# caben ~36 pt sin tocar el código de barras ni el "23:00". Antonio pidió
+# crecerlo tras ver los 20 pt originales impresos ("crecer más", 09-jul).
+H_LOGO_MAX = 36.0
 
 
 # Forma compacta (sin espacios) → clave canónica de LOGO_FILES/CONTACTS.
