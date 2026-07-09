@@ -127,6 +127,17 @@ def _connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_history_ts ON print_history (ts DESC)"
     )
+    # Datos de pedido por envío (JSON), persistentes: el caché en RAM de
+    # orders_hub se pierde con cada reinicio y los envíos ya recolectados no
+    # vuelven a aparecer en la cola — sin esto, una REIMPRESIÓN posterior
+    # salía sin talón, sin estampado y sin registro (visto el 09-jul-2026).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS order_info ("
+        " shipment_id TEXT PRIMARY KEY,"
+        " json TEXT NOT NULL,"
+        " updated INTEGER NOT NULL"
+        ")"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_history_shipment ON print_history (shipment_id)"
     )
@@ -337,16 +348,62 @@ def count_print_history_today_split() -> dict:
 
 
 def count_risk() -> int:
-    """Envíos que quedaron 'en riesgo' (pedidos a ML sin confirmar impresión)."""
+    """Envíos 'en riesgo' SIN RESOLVER (sin una reimpresión exitosa posterior).
+
+    Un riesgo se considera resuelto cuando el mismo envío tiene una fila 'ok'
+    más reciente: la reimpresión confirmada es la reposición de esa etiqueta.
+    El Historial conserva la fila 'risk' original (dato fiel), pero el aviso
+    amarillo ya no la cuenta.
+    """
     with _lock:
         conn = _connect()
         try:
             n = conn.execute(
-                "SELECT COUNT(*) FROM print_history WHERE status = 'risk'"
+                "SELECT COUNT(*) FROM print_history r"
+                " WHERE r.status = 'risk'"
+                "   AND NOT EXISTS (SELECT 1 FROM print_history o"
+                "                    WHERE o.shipment_id = r.shipment_id"
+                "                      AND o.status = 'ok' AND o.ts >= r.ts)"
             ).fetchone()[0]
         finally:
             conn.close()
     return int(n)
+
+
+# --- Datos de pedido por envío (respaldo persistente del caché de orders_hub) ---
+def set_order_info(shipment_id: str, info: dict) -> None:
+    import json as _json
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO order_info (shipment_id, json, updated)"
+                " VALUES (?, ?, ?)"
+                " ON CONFLICT(shipment_id) DO UPDATE SET"
+                " json=excluded.json, updated=excluded.updated",
+                (str(shipment_id), _json.dumps(info, ensure_ascii=False),
+                 int(time.time())))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_order_info(shipment_id: str) -> Optional[dict]:
+    import json as _json
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT json FROM order_info WHERE shipment_id = ?",
+                (str(shipment_id),)).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        return None
+    try:
+        return _json.loads(row[0])
+    except ValueError:
+        return None
 
 
 # --- Cuentas / tiendas (multi-proveedor) -------------------------------------

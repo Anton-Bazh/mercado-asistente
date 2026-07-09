@@ -320,28 +320,15 @@ async function afterPrint(printedOrders) {
   renderCola();
 }
 
-// Imprime un envío individual (reimpresión). Verifica antes de pedir a ML.
+// Imprime un envío individual (reimpresión) POR EL MOTOR DE LOTES: una
+// reposición debe salir idéntica a como habría salido la original — folio,
+// estampado, registro y vigilancia incluidos (pedido de Antonio, 09-jul).
 async function printOne(order, fmt) {
   if (!order) return;
   fmt = fmt || state.format;
   if (canServerPrint()) {
-    try {
-      const fd = new FormData();
-      fd.append('format', fmt); fd.append('printer', state.printer);
-      fd.append('meta', buildMeta([order]));
-      const r = await api(`/api/print/${encodeURIComponent(order.shipment_id)}`, { method:'POST', body:fd });
-      showBanner(`Enviado a impresora: ${r.printer}`, 'success');
-      await afterPrint([order]);
-    } catch (e) {
-      if (e.status === 409) {
-        // Bloqueo preventivo: la impresora no está lista. Nada se perdió.
-        showBanner(e.message, 'error');
-        await loadPrinters({ force: true });
-      } else {
-        showCritical(`Venta #${order.order_id}: ${e.message}`);
-      }
-      await loadDoneRecent();
-    }
+    await startBatch([order], `Reimpresión #${order.order_id || order.shipment_id}`,
+                     false, fmt);
   } else {
     openLabelUrl(`/api/label/${encodeURIComponent(order.shipment_id)}?format=${fmt}`, fmt === 'zpl');
     log('WARN', 'impresion', `Sin impresora: etiqueta ${fmt.toUpperCase()} de #${order.order_id} abierta en el navegador.`);
@@ -350,9 +337,10 @@ async function printOne(order, fmt) {
 
 // Arranca un lote en segundo plano (motor seguro hoja por hoja) y sigue su progreso.
 // confirmed: reintento tras el modal de saldo negativo (saldo_negativo_confirmado=1).
-async function startBatch(orders, labelWhat, confirmed = false) {
+// fmtOverride: formato explícito (reimpresiones respetan el de la fila original).
+async function startBatch(orders, labelWhat, confirmed = false, fmtOverride = null) {
   if (!orders.length) { showBanner('No hay ventas para imprimir.', 'info'); return; }
-  const fmt = state.format;
+  const fmt = fmtOverride || state.format;
   if (!canServerPrint()) {
     const ids = orders.map(o => o.shipment_id).join(',');
     openLabelUrl(`/api/labels?ids=${encodeURIComponent(ids)}&format=${fmt}`, fmt === 'zpl');
@@ -382,7 +370,7 @@ async function startBatch(orders, labelWhat, confirmed = false) {
     // 409 de saldo negativo: detail = {message, items}; distinto del 409 de
     // "ya hay un lote imprimiéndose" (detail = string) — ver api().
     if (e.status === 409 && e.detail && Array.isArray(e.detail.items)) {
-      openLowMarginModal(e.detail.items, () => startBatch(orders, labelWhat, true));
+      openLowMarginModal(e.detail.items, () => startBatch(orders, labelWhat, true, fmtOverride));
     } else if (e.status === 409) {
       showBanner(e.message, 'error');
     } else {

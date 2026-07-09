@@ -202,8 +202,18 @@ def get_label(account_id: str, shipment_id: str, fmt: str = "pdf",
 
 def order_info(shipment_id: str) -> dict:
     """Datos cacheados del pedido de un envío (para talón y registro).
-    Dict vacío si no está en caché (p. ej. tras reinicio)."""
-    return dict(_ORDER_INFO.get(str(shipment_id)) or {})
+
+    Primero la RAM; si no está (reinicio, o el envío ya salió de la cola por
+    recolectado), cae al respaldo persistente en SQLite — así una REIMPRESIÓN
+    sale con talón/estampado/registro igual que la impresión original.
+    Dict vacío si no se conoce en ninguna capa."""
+    sid = str(shipment_id)
+    info = _ORDER_INFO.get(sid)
+    if info is None:
+        info = storage.get_order_info(sid)
+        if info is not None:
+            _ORDER_INFO[sid] = info      # recalentar la RAM
+    return dict(info or {})
 
 
 def _remember_order(row: dict) -> None:
@@ -226,5 +236,10 @@ def _remember_order(row: dict) -> None:
         "account_id": row.get("account_id"),
         "account_name": row.get("account_name"),
     }
+    try:
+        storage.set_order_info(sid, _ORDER_INFO[sid])   # respaldo persistente
+    except Exception:
+        log.debug("No se pudo persistir el pedido del envío %s.", sid,
+                  exc_info=True)
     while len(_ORDER_INFO) > _ORDER_INFO_MAX:
         _ORDER_INFO.pop(next(iter(_ORDER_INFO)))
