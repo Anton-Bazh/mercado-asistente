@@ -33,6 +33,12 @@ _MARGIN = 9.0          # margen interior del talón
 _INK = (0.13, 0.14, 0.16)
 _MUTED = (0.45, 0.47, 0.5)
 
+# Columna de estampado (Cambio 3.2): folio/empresa color del día + punto rojo
+# de saldo negativo + lote, para Walmart/TikTok — reservada a la derecha del
+# talón cuando add_stub recibe `stamp`. Ver label_enrich.stub_stamp().
+STAMP_W_PT = 58.0
+_STAMP_GAP = 6.0
+
 
 # --- Configuración -------------------------------------------------------------
 # Dos niveles: valor por marketplace (providers) y excepción por tienda
@@ -90,11 +96,14 @@ def enabled_for(provider: str, account_id: str | None = None) -> bool:
 
 # --- Inyección del talón --------------------------------------------------------
 def add_stub(pdf_bytes: bytes, products: list[dict],
-             order_ref: str = "") -> bytes:
+             order_ref: str = "", stamp: dict | None = None) -> bytes:
     """Devuelve el PDF con un talón arriba de CADA página de etiqueta.
 
     products: [{title, sku, quantity}] del pedido (mismo talón en todas las
     páginas del envío). Si no hay productos, devuelve el original sin tocar.
+    stamp: bloque opcional de estampado (Cambio 3.2, ver label_enrich.stub_stamp)
+    — reserva una columna a la derecha del talón con folio/empresa en el color
+    del día, punto rojo de saldo negativo y código de lote.
     """
     if not products:
         return pdf_bytes
@@ -107,7 +116,7 @@ def add_stub(pdf_bytes: bytes, products: list[dict],
             for i in range(src.page_count):
                 r = src.load_page(i).rect
                 page = out.new_page(width=r.width, height=r.height + STUB_H_PT)
-                _draw_stub(page, r.width, products, order_ref)
+                _draw_stub(page, r.width, products, order_ref, stamp)
                 page.show_pdf_page(
                     fitz.Rect(0, STUB_H_PT, r.width, STUB_H_PT + r.height), src, i)
             return out.tobytes()
@@ -118,17 +127,24 @@ def add_stub(pdf_bytes: bytes, products: list[dict],
 
 
 def _draw_stub(page: fitz.Page, width: float, products: list[dict],
-               order_ref: str) -> None:
-    x0, x1 = _MARGIN, width - _MARGIN
+               order_ref: str, stamp: dict | None = None) -> None:
+    full_x1 = width - _MARGIN
+    x0 = _MARGIN
+    x1 = full_x1 - (STAMP_W_PT + _STAMP_GAP) if stamp else full_x1
     max_w = x1 - x0
 
     # Encabezado: qué es y qué hacer con él; referencia del pedido a la derecha.
-    page.insert_text((x0, 11), _fit("TALÓN DE CONTROL · retirar antes de entregar a paquetería",
-                                    6.3, max_w), fontsize=6.3, color=_MUTED)
+    # La referencia se mide PRIMERO y se descuenta del ancho del encabezado
+    # (si no, con poco ancho disponible —p. ej. con columna de estampado—
+    # ambos textos se solapan: el encabezado no "sabe" que debe cederle sitio).
+    header_max_w = max_w
     if order_ref:
         ref = _fit(f"#{order_ref}", 6.3, max_w * 0.4)
         w = fitz.get_text_length(ref, fontname="helv", fontsize=6.3)
+        header_max_w = max_w - w - 6.0
         page.insert_text((x1 - w, 11), ref, fontsize=6.3, color=_MUTED)
+    page.insert_text((x0, 11), _fit("TALÓN DE CONTROL · retirar antes de entregar a paquetería",
+                                    6.3, header_max_w), fontsize=6.3, color=_MUTED)
 
     total = sum(int(p.get("quantity", 1) or 1) for p in products)
     if len(products) == 1:
@@ -152,13 +168,55 @@ def _draw_stub(page: fitz.Page, width: float, products: list[dict],
         page.insert_text((x0, y + 1), _fit(tail, 8, max_w, "cour"),
                          fontname="cour", fontsize=8, color=_INK)
 
-    # Línea de corte punteada con tijeras.
+    # Línea de corte punteada con tijeras (todo el ancho: el talón, con o sin
+    # columna de estampado, se retira completo de una sola tirada).
     cut_y = STUB_H_PT - 12
     _draw_scissors(page, x0, cut_y)
-    page.draw_line(fitz.Point(x0 + 16, cut_y), fitz.Point(x1, cut_y),
+    page.draw_line(fitz.Point(x0 + 16, cut_y), fitz.Point(full_x1, cut_y),
                    color=_MUTED, width=0.9, dashes="[3 3] 0")
-    page.insert_text((x1 - fitz.get_text_length("corte", fontname="helv", fontsize=5.6) ,
+    page.insert_text((full_x1 - fitz.get_text_length("corte", fontname="helv", fontsize=5.6),
                       cut_y - 3), "corte", fontsize=5.6, color=_MUTED)
+
+    if stamp:
+        _draw_stamp(page, x1 + _STAMP_GAP, full_x1, stamp)
+
+
+def _draw_stamp(page: fitz.Page, sx0: float, sx1: float, stamp: dict) -> None:
+    """Columna de estampado (Cambio 3.2): folio + empresa en el color del día,
+    punto rojo de saldo negativo (si aplica) y código de lote — los mismos
+    datos que label_enrich.enrich() dibuja sobre la etiqueta de ML, pero aquí
+    van dentro del talón removible (Walmart/TikTok), sin tocar la guía del
+    transportista."""
+    cx = (sx0 + sx1) / 2
+    col_w = sx1 - sx0
+    rgb = stamp.get("color") or _INK
+
+    page.draw_line(fitz.Point(sx0 - _STAMP_GAP / 2, 8),
+                   fitz.Point(sx0 - _STAMP_GAP / 2, STUB_H_PT - 16),
+                   color=_MUTED, width=0.6)
+
+    if stamp.get("low"):
+        page.draw_circle(fitz.Point(sx1 - 6, 12), 4.5, color=(1, 1, 1),
+                         fill=(1, 0, 0), width=1.0)
+
+    folio_txt = str(stamp.get("folio") or "")
+    if folio_txt:
+        fsize = 16.0
+        fw = fitz.get_text_length(folio_txt, fontname="hebo", fontsize=fsize)
+        page.insert_text((cx - fw / 2, 34), folio_txt, fontname="hebo",
+                         fontsize=fsize, color=rgb)
+
+    company = _fit(_txt(stamp.get("company") or ""), 6.3, col_w, "hebo")
+    if company:
+        cw = fitz.get_text_length(company, fontname="hebo", fontsize=6.3)
+        page.insert_text((cx - cw / 2, 44), company, fontname="hebo",
+                         fontsize=6.3, color=rgb)
+
+    batch = _fit(_txt(stamp.get("batch_code") or ""), 6.0, col_w, "cour")
+    if batch:
+        bw = fitz.get_text_length(batch, fontname="cour", fontsize=6.0)
+        page.insert_text((cx - bw / 2, STUB_H_PT - 17), batch, fontname="cour",
+                         fontsize=6.0, color=_INK)
 
 
 def _draw_scissors(page: fitz.Page, x: float, y: float) -> None:

@@ -238,6 +238,24 @@ def _registration_context(item: dict, fmt: str) -> dict | None:
             "organization": organization}
 
 
+def _stub_stamp_for(item: dict, fmt: str) -> dict | None:
+    """Bloque de estampado del talón removible para Walmart/TikTok (Cambio
+    3.2) — Mercado Libre no pasa por aquí: su etiqueta ya trae el estampado
+    directo (_registration_context + label_enrich.enrich). Usa el mismo
+    contador de folio por tienda que ML (D1); sin punto rojo porque Walmart/
+    TikTok aún no tienen una fuente de saldo/markup (nota de Antonio, guía de
+    unificación §Cambio 3.2) — se activará cuando se defina esa fuente."""
+    if fmt != "pdf":
+        return None
+    acc = storage.get_account(item.get("account_id") or "")
+    if not acc or acc.get("provider") not in ("walmart", "tiktok"):
+        return None
+    organization = label_enrich.normalize_company(item.get("account_name"))
+    return label_enrich.stub_stamp(
+        folio=_next_folio(organization), company=organization,
+        batch_code=_job.get("code_lote") or "")
+
+
 def _next_folio(organization: str) -> int:
     """Folio consecutivo por empresa/tienda (D1, 08-jul-2026)."""
     if organization not in _job["folio_next"]:
@@ -435,8 +453,10 @@ def _run(job_id: str, fmt: str, printer: str) -> None:
 
         _set(item, "printing")
         _msg(f"Pidiendo etiqueta {idx + 1} de {len(items)}…")
+        stamp = _stub_stamp_for(item, fmt)
         try:
-            pdf, _ct, _fn = orders_hub.get_label(item.get("account_id"), item["shipment_id"], fmt)
+            pdf, _ct, _fn = orders_hub.get_label(item.get("account_id"), item["shipment_id"],
+                                                 fmt, stamp=stamp)
         except ProviderError as exc:
             # No se pudo pedir esta etiqueta (NO consumida). Imprime buffer y para.
             flush()

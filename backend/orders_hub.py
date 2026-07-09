@@ -141,7 +141,12 @@ def list_all_pending() -> dict:
     }
 
 
-def get_label(account_id: str, shipment_id: str, fmt: str = "pdf"):
+def get_label(account_id: str, shipment_id: str, fmt: str = "pdf",
+              stamp: dict | None = None):
+    """stamp: bloque de estampado (Cambio 3.2, ver label_enrich.stub_stamp) que
+    se dibuja DENTRO del talón removible de Walmart/TikTok — nunca sobre la
+    guía del transportista. Se ignora si el talón no aplica (ML, o el
+    proveedor lo tiene deshabilitado) o si el envío no tiene productos."""
     acc = storage.get_account(account_id)
     if not acc:
         log.error("Se pidió la etiqueta del envío %s de una cuenta inexistente (%s).",
@@ -169,7 +174,8 @@ def get_label(account_id: str, shipment_id: str, fmt: str = "pdf"):
         if info and info.get("products"):
             try:
                 content = label_stub.add_stub(content, info["products"],
-                                              order_ref=str(info.get("order_id") or ""))
+                                              order_ref=str(info.get("order_id") or ""),
+                                              stamp=stamp)
             except Exception:
                 log.warning("%s no se pudo dibujar el talón de control del envío "
                             "%s (la etiqueta sale sin talón).",

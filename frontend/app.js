@@ -1067,16 +1067,17 @@ async function updateStubPreviews() {
   const prov = $('stub-prev-provider') ? $('stub-prev-provider').value : 'walmart';
   const n = parseInt($('stub-count').value, 10) || 8;
   const bust = Date.now();
-  // Estampado (unificación con el Extractor): solo aplica a Mercado Libre.
+  // Estampado (unificación con el Extractor): folio/empresa/lote aplican a
+  // los 3 marketplaces (Walmart/TikTok dentro del talón, Cambio 3.2); el
+  // punto rojo de saldo negativo sigue siendo exclusivo de ML (sin fuente de
+  // saldo todavía para Walmart/TikTok).
   const isMl = prov === 'ml';
-  $('enrich-controls').style.display = isMl ? 'flex' : 'none';
-  let enrich = '';
-  if (isMl) {
-    const comp = encodeURIComponent($('enrich-company').value || 'INMATMEX');
-    const folio = parseInt($('enrich-folio').value, 10) || 101;
-    const low = $('enrich-low').checked ? '1' : '0';
-    enrich = `&company=${comp}&folio=${folio}&low=${low}`;
-  }
+  $('enrich-controls').style.display = 'flex';
+  $('enrich-low-wrap').style.display = isMl ? 'flex' : 'none';
+  const comp = encodeURIComponent($('enrich-company').value || 'INMATMEX');
+  const folio = parseInt($('enrich-folio').value, 10) || 101;
+  const low = isMl && $('enrich-low').checked ? '1' : '0';
+  const enrich = `&company=${comp}&folio=${folio}&low=${low}`;
   $('stub-frame-label').src = `/api/stub-preview?provider=${prov}${enrich}&_=${bust}`;
   $('stub-frame-sheet').src = `/api/layout-preview?count=${n}&provider=${prov}${enrich}&_=${bust}`;
   try {

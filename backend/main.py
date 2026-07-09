@@ -704,15 +704,19 @@ def layout_preview(count: int = 4, provider: str = "", company: str = "INMATMEX"
     de control está activo para él, las etiquetas de muestra lo incluyen.
     Para Mercado Libre (o sin provider) las muestras salen ESTAMPADAS
     (logo/folio/punto — unificación con el Extractor); company/folio/low
-    controlan la vista.
+    controlan la vista. Walmart/TikTok llevan el mismo folio/empresa/lote
+    dentro del talón (Cambio 3.2), sin punto rojo (aún sin fuente de saldo).
     """
     w, h, _real = _provider_label_size(provider)
     count = max(1, count)
     brand = _PROVIDER_BRANDS.get(provider, "MERCADO ENVIOS")
     sample = label_layout.sample_labels(count, w, h, brand=brand)
     if provider and label_stub.enabled_for(provider):
+        stamp = None
+        if provider in ("walmart", "tiktok"):
+            stamp = label_enrich.stub_stamp(folio=folio, company=company, batch_code="A1B2C")
         sample = label_stub.add_stub(sample, label_stub.SAMPLE_PRODUCTS,
-                                     order_ref="PEDIDO-DEMO")
+                                     order_ref="PEDIDO-DEMO", stamp=stamp)
     if provider in ("", "ml"):
         sample = label_enrich.enrich(
             sample, folio=folio, company=company, batch_code="A1B2C",
@@ -755,13 +759,18 @@ def stub_preview(provider: str = "walmart", company: str = "INMATMEX",
                  folio: int = 101, low: str = "1") -> Response:
     """Una etiqueta de muestra tal como saldrá impresa con la config actual
     (con talón si está activo para ese marketplace; ML sale ESTAMPADA con
-    logo/folio/punto — unificación con el Extractor)."""
+    logo/folio/punto — unificación con el Extractor). Walmart/TikTok llevan
+    el mismo folio/empresa/lote dentro del talón (Cambio 3.2), sin punto rojo
+    (aún sin fuente de saldo para esos marketplaces)."""
     w, h, _real = _provider_label_size(provider)
     pdf = label_layout.sample_labels(1, w, h,
                                      brand=_PROVIDER_BRANDS.get(provider, "MUESTRA"))
     if label_stub.enabled_for(provider):
+        stamp = None
+        if provider in ("walmart", "tiktok"):
+            stamp = label_enrich.stub_stamp(folio=folio, company=company, batch_code="A1B2C")
         pdf = label_stub.add_stub(pdf, label_stub.SAMPLE_PRODUCTS,
-                                  order_ref="PEDIDO-DEMO")
+                                  order_ref="PEDIDO-DEMO", stamp=stamp)
     if provider in ("", "ml"):
         pdf = label_enrich.enrich(
             pdf, folio=folio, company=company, batch_code="A1B2C",

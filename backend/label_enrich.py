@@ -129,6 +129,24 @@ def enrich(pdf_bytes: bytes, *, folio: int, company: str,
         doc.close()
 
 
+def stub_stamp(*, folio: int, company: str, batch_code: str,
+              markup: float | None = None, color: str | None = None) -> dict:
+    """Bloque de estampado para el talón removible de Walmart/TikTok
+    (Cambio 3.2): mismos datos que enrich() — folio, color del día, punto
+    rojo de saldo negativo y código de lote — para que label_stub los dibuje
+    dentro del talón en vez de sobre la guía del transportista. `markup` hoy
+    normalmente llega en None (Walmart/TikTok no tienen fuente de saldo
+    todavía) → sin punto rojo hasta que se defina esa fuente (nota de
+    Antonio, guía de unificación §Cambio 3.2)."""
+    return {
+        "folio": folio,
+        "company": normalize_company(company),
+        "batch_code": batch_code,
+        "low": markup is not None and markup <= LOW_MARKUP,
+        "color": _hex_rgb(color or day_color()),
+    }
+
+
 def _stamp_page(page: fitz.Page, *, folio: int, company: str,
                 rgb: tuple, contact: str, logo, batch_code: str,
                 low: bool) -> None:
