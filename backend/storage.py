@@ -114,6 +114,16 @@ def _connect() -> sqlite3.Connection:
             log.info("Migración: columna 'origin' añadida a print_history.")
         except sqlite3.OperationalError:
             pass
+    if "account_id" not in cols:
+        # id de la tienda: sin él, la REIMPRESIÓN desde Historial no sabe a
+        # qué cuenta pedir la etiqueta (bug de la prueba real del 09-jul;
+        # solo se guardaba el nombre). Filas viejas quedan NULL y la
+        # impresión las resuelve por nombre o por cuenta única.
+        try:
+            conn.execute("ALTER TABLE print_history ADD COLUMN account_id TEXT")
+            log.info("Migración: columna 'account_id' añadida a print_history.")
+        except sqlite3.OperationalError:
+            pass
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_history_ts ON print_history (ts DESC)"
     )
@@ -206,7 +216,7 @@ def set_many(items: dict[str, Optional[str]]) -> None:
 _HISTORY_COLS = (
     "id", "ts", "batch_id", "shipment_id", "order_id", "buyer_name",
     "product_summary", "format", "printer", "sheets", "ok", "status", "error",
-    "account", "origin",
+    "account", "origin", "account_id",
 )
 
 
@@ -224,6 +234,7 @@ def add_print_history(
     account: Optional[str] = None,
     origin: str = "manual",
     ts: Optional[int] = None,
+    account_id: Optional[str] = None,
 ) -> None:
     """Registra un intento de impresión de un envío con su estado."""
     ok = 1 if status == "ok" else 0
@@ -234,14 +245,14 @@ def add_print_history(
                 "INSERT INTO print_history"
                 " (ts, batch_id, shipment_id, order_id, buyer_name,"
                 "  product_summary, format, printer, sheets, ok, status, error,"
-                "  account, origin)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  account, origin, account_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ts if ts is not None else int(time.time()),
                     batch_id, str(shipment_id),
                     str(order_id) if order_id is not None else None,
                     buyer_name, product_summary, fmt, printer, sheets,
-                    ok, status, error, account, origin,
+                    ok, status, error, account, origin, account_id,
                 ),
             )
             conn.commit()

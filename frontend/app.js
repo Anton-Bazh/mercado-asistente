@@ -668,7 +668,7 @@ function doneItemHtml(h) {
       <div class="q-sub">${esc(h.buyer_name || ('venta '+(h.order_id||'')))} · ${time}${origin}</div>
       ${store}
     </div>
-    ${canReprint ? `<button class="xbtn" title="Reimprimir" data-sid="${esc(h.shipment_id)}" data-fmt="${esc(h.format||'pdf')}" data-oid="${esc(h.order_id||'')}" data-buyer="${esc(h.buyer_name||'')}" data-prod="${esc(h.product_summary||'')}" data-act="reprint-done" style="color:var(--accent);align-self:center">⟳</button>`
+    ${canReprint ? `<button class="xbtn" title="Reimprimir" data-sid="${esc(h.shipment_id)}" data-fmt="${esc(h.format||'pdf')}" data-oid="${esc(h.order_id||'')}" data-buyer="${esc(h.buyer_name||'')}" data-prod="${esc(h.product_summary||'')}" data-aid="${esc(h.account_id||'')}" data-aname="${esc(h.account||'')}" data-act="reprint-done" style="color:var(--accent);align-self:center">⟳</button>`
       : `<span class="q-sub" style="flex:0 0 auto;align-self:center">${esc((h.format||'').toUpperCase())}</span>`}
   </div>`;
 }
@@ -851,7 +851,7 @@ async function renderHistorial(opts = {}) {
       <span style="width:132px;font-size:12px;color:var(--ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(h.printer||'')}">${esc(h.printer || '—')}</span>
       <span style="width:52px;font-family:var(--mono);font-size:12px">${h.sheets != null ? esc(h.sheets) : '—'}</span>
       <span style="width:78px"><span class="lvl" style="background:${bg};color:${fg}">${txt}</span></span>
-      <span style="width:92px"><button class="btn btn-ghost" style="padding:4px 9px;font-size:11px" data-sid="${esc(h.shipment_id)}" data-fmt="${esc(h.format||'pdf')}" data-oid="${esc(h.order_id||'')}" data-buyer="${esc(h.buyer_name||'')}" data-prod="${esc(h.product_summary||'')}" data-act="reprint">Reimprimir</button></span>
+      <span style="width:92px"><button class="btn btn-ghost" style="padding:4px 9px;font-size:11px" data-sid="${esc(h.shipment_id)}" data-fmt="${esc(h.format||'pdf')}" data-oid="${esc(h.order_id||'')}" data-buyer="${esc(h.buyer_name||'')}" data-prod="${esc(h.product_summary||'')}" data-aid="${esc(h.account_id||'')}" data-aname="${esc(h.account||'')}" data-act="reprint">Reimprimir</button></span>
     </div>`;
   }).join('');
 }
@@ -1466,6 +1466,7 @@ function init() {
   $('col-done').addEventListener('click', async e => {
     const b = e.target.closest('[data-act="reprint-done"]'); if (!b) return;
     await printOne({ shipment_id: b.dataset.sid, order_id: b.dataset.oid, buyer_name: b.dataset.buyer,
+                     account_id: b.dataset.aid || '', account_name: b.dataset.aname || '',
                      products: b.dataset.prod ? [{ title: b.dataset.prod, quantity: 1 }] : [] }, b.dataset.fmt);
   });
 
@@ -1601,6 +1602,7 @@ function init() {
     const b = e.target.closest('[data-act="reprint"]'); if (!b) return;
     const order = { shipment_id: b.dataset.sid, order_id: b.dataset.oid,
                     buyer_name: b.dataset.buyer,
+                    account_id: b.dataset.aid || '', account_name: b.dataset.aname || '',
                     products: b.dataset.prod ? [{ title: b.dataset.prod, quantity: 1 }] : [] };
     await printOne(order, b.dataset.fmt);
     renderHistorial();

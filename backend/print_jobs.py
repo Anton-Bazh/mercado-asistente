@@ -208,7 +208,7 @@ def _record(item: dict, fmt: str, status_val: str, printer: str,
         order_id=item.get("order_id"), buyer_name=item.get("buyer_name"),
         product_summary=item.get("product_summary"),
         printer=printer, sheets=sheets, error=error,
-        account=item.get("account_name"),
+        account=item.get("account_name"), account_id=item.get("account_id"),
         origin=_job.get("origin", "manual") if _job else "manual",
     )
 

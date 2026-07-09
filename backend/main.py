@@ -470,7 +470,37 @@ def _record1(sid: str, fmt: str, status_val: str, info: dict,
         status=status_val, order_id=info.get("order_id"),
         buyer_name=info.get("buyer_name"), product_summary=info.get("product_summary"),
         printer=printer, sheets=sheets, error=error, account=info.get("account_name"),
+        account_id=info.get("account_id"),
     )
+
+
+def _resolve_account_id(info: dict) -> str | None:
+    """Tienda del envío, con respaldo para reimpresiones del historial viejo.
+
+    Las filas de print_history anteriores al 09-jul-2026 no guardaban el
+    account_id (solo el nombre de la tienda) y la reimpresión fallaba con
+    400. Respaldo: 1) por nombre exacto de tienda si viene en el meta;
+    2) si solo hay una cuenta conectada, esa (no hay ambigüedad posible).
+    """
+    account_id = info.get("account_id")
+    if account_id:
+        return account_id
+    accounts = storage.list_accounts()
+    name = (info.get("account_name") or "").strip().lower()
+    if name:
+        matches = [a for a in accounts
+                   if (a.get("name") or "").strip().lower() == name]
+        if len(matches) == 1:
+            log.info("Reimpresión sin account_id: tienda resuelta por nombre "
+                     "«%s».", matches[0].get("name"))
+            return matches[0]["id"]
+    connected = [a for a in accounts
+                 if a.get("enabled") and a.get("refresh_token")]
+    if len(connected) == 1:
+        log.info("Reimpresión sin account_id: única cuenta conectada "
+                 "(«%s»).", connected[0].get("name"))
+        return connected[0]["id"]
+    return None
 
 
 @app.post("/api/print/{shipment_id}")
@@ -479,9 +509,10 @@ def print_label(shipment_id: str, format: str = Form("pdf"),
     """Imprime una etiqueta: verifica → pide la etiqueta → imprime → confirma."""
     fmt = "zpl" if format.lower() == "zpl" else "pdf"
     info = _parse_meta(meta).get(str(shipment_id), {})
-    account_id = info.get("account_id")
+    account_id = _resolve_account_id(info)
     if not account_id:
         raise HTTPException(status_code=400, detail="Falta la tienda del envío (account_id).")
+    info["account_id"] = account_id
     target = _resolve_target(printer)
 
     lctx = logutil.ctx(info.get("provider"), info.get("account_name"))
