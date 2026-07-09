@@ -470,20 +470,40 @@ def wait_until_idle(name: str, timeout: float = 120.0) -> bool:
     return not printer_busy(name)
 
 
+# Motivos TRANSITORIOS: aparecen de forma normal mientras CUPS abre la
+# conexión (típico en colas de red/compartidas como las de mtmdelta) y NO
+# significan fallo salvo que persistan. En la prueba real del 09-jul,
+# «connecting-to-device» apareció de paso y la etiqueta salió bien, pero el
+# lote quedó marcado en riesgo por declarar el fallo al primer aviso.
+_TRANSIENT_REASONS = ("connecting-to-device",)
+TRANSIENT_GRACE_S = 30.0
+
+
 def wait_for_job(name: str, job_id: str, timeout: float = 240.0) -> tuple[str, str]:
     """Vigila un trabajo hasta que complete o falle.
 
-    Devuelve ('completed'|'failed'|'timeout', motivo).
+    Devuelve ('completed'|'failed'|'timeout', motivo). Los motivos
+    transitorios (_TRANSIENT_REASONS) solo cuentan como fallo si persisten
+    más de TRANSIENT_GRACE_S; los accionables (atasco, sin papel, tapa
+    abierta…) fallan de inmediato, como siempre.
     """
     end = time.time() + timeout
     seen_active = False
     gone_checks = 0
+    transient_since: float | None = None
     while time.time() < end:
         if job_id in completed_job_ids(name):
             return "completed", ""
         p = _text(["lpstat", "-p", _safe_name(name)]).lower()
         reasons = _state_reasons(name)
         jam = next((k for k in _BAD_REASONS if k in reasons), None)
+        if jam in _TRANSIENT_REASONS and "disabled" not in p:
+            if transient_since is None:
+                transient_since = time.time()
+            if time.time() - transient_since <= TRANSIENT_GRACE_S:
+                jam = None      # de paso: seguir vigilando
+        else:
+            transient_since = None
         if "disabled" in p or jam:
             detail = f"La impresora se detuvo: {reasons}" if reasons and reasons != "none" \
                 else "La impresora se detuvo o se atascó."
