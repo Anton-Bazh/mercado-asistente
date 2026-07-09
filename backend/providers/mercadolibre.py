@@ -187,6 +187,10 @@ class MLProvider(Provider):
         except httpx.HTTPError as exc:
             raise ProviderError(f"Error de red al pedir la etiqueta: {exc}") from exc
         if resp.status_code >= 400:
+            if "picked_up" in resp.text:
+                raise ProviderError(
+                    "El paquete ya fue recolectado por la paquetería: Mercado "
+                    "Libre ya no entrega esta etiqueta.")
             raise ProviderError(f"No se pudo obtener la etiqueta ({resp.status_code}): {resp.text[:200]}")
         content = resp.content
         if fmt == "zpl":

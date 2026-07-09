@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import label_cache
 import label_stub
 import logutil
 import storage
@@ -154,7 +155,23 @@ def get_label(account_id: str, shipment_id: str, fmt: str = "pdf",
         raise ProviderError("Cuenta no encontrada para el envío.")
     log.debug("%s pidiendo etiqueta del envío %s (%s)…",
               logutil.account_ctx(acc), shipment_id, fmt)
-    content, ctype, fname = get_provider(acc["provider"]).get_label(acc, shipment_id, fmt)
+    try:
+        content, ctype, fname = get_provider(acc["provider"]).get_label(acc, shipment_id, fmt)
+        # Copia local para reintentos: si la impresión falla por causa del
+        # sistema, se reimprime desde aquí sin volver a pedirla (ML no la
+        # re-entrega una vez recolectado el paquete).
+        label_cache.save(shipment_id, content, fmt)
+    except ProviderError as exc:
+        cached = label_cache.load(shipment_id, fmt)
+        if cached is None:
+            raise
+        log.warning("%s el marketplace no re-entregó la etiqueta del envío %s "
+                    "(%s) — se imprime la COPIA LOCAL guardada en la descarga "
+                    "original.", logutil.account_ctx(acc), shipment_id, exc)
+        if fmt == "zpl":
+            content, ctype, fname = cached, "text/plain; charset=utf-8", f"etiqueta_{shipment_id}.zpl"
+        else:
+            content, ctype, fname = cached, "application/pdf", f"etiqueta_{shipment_id}.pdf"
     # Talón de control de producto (Walmart/TikTok): solo PDF, y nunca debe
     # bloquear la impresión si algo falla al dibujarlo.
     if fmt == "pdf" and ctype.startswith("application/pdf") \
