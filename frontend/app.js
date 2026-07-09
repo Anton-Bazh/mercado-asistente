@@ -1983,8 +1983,11 @@ function init() {
       case 'cola':
         renderAutoKpi();                          // KPI «Automático» de la cola
         if (state.status.connected && due('orders', 15000)) {
+          // Impresos primero: es SQLite local (ms). Antes esperaba detrás de
+          // la consulta a ML y la columna tardaba lo que tardara la Cola.
+          await loadDoneRecent();
+          renderCola();
           await loadOrders();                     // refresco silencioso de la cola
-          await loadDoneRecent();                 // y del mini-historial (Impresos)
           renderCola();
         }
         break;

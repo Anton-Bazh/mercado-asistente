@@ -9,6 +9,7 @@ import base64
 import hashlib
 import secrets
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
@@ -154,22 +155,39 @@ class MLProvider(Provider):
         seller = account.get("seller_id") or self._fetch_seller(account)
         params = {"seller": seller, "order.status": "paid", "sort": "date_desc", "limit": limit}
         orders = self._get(account, ORDERS_SEARCH_URL, params=params).json().get("results", [])
-        rows: list[dict] = []
+        pairs: list[tuple[dict, object]] = []
         seen: set[str] = set()
         for order in orders:
-            shipping = order.get("shipping") or {}
-            sid = shipping.get("id")
+            sid = (order.get("shipping") or {}).get("id")
             if not sid or str(sid) in seen:
                 continue
+            seen.add(str(sid))
+            pairs.append((order, sid))
+
+        # El detalle de cada envío es una llamada HTTP aparte: en serie, 50
+        # pedidos eran 20-26 s por refresco de la Cola (y de paso atoraban al
+        # resto de la interfaz). En paralelo bajan a ~3 s. El token se valida
+        # UNA vez antes del abanico para que los hilos no compitan por el
+        # refresh de OAuth.
+        self._valid_token(account)
+
+        def fetch(sid):
             try:
-                shipment = self._get_shipment(account, sid)
+                return self._get_shipment(account, sid)
             except ProviderError:
+                return None
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            shipments = list(ex.map(fetch, (sid for _, sid in pairs)))
+
+        rows: list[dict] = []
+        for (order, _sid), shipment in zip(pairs, shipments):
+            if shipment is None:
                 continue
             # ready_to_ship = imprimible; pending/handling (p. ej. buffered =
             # venta programada) aún no tiene etiqueta → va a «Próximos».
             if shipment.get("status") not in ("ready_to_ship", "pending", "handling"):
                 continue
-            seen.add(str(sid))
             rows.append(_normalize(order, shipment))
         return rows
 
